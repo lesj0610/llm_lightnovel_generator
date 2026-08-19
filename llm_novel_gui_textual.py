@@ -453,7 +453,9 @@ class FourPaneApp(App):
         episode_full_track = []
         plot_hash = getattr(config, 'plot_hash', '')
         progress_dir = os.path.join(os.path.dirname(__file__), "progress")
-        result_dir = os.path.join(os.path.dirname(__file__), "result")
+        # run 단위 저장(result/<run_id>/) 도입에 따라 최신 run 디렉토리를 해석
+        result_dir = llm_novel_gui_func.resolve_latest_result_dir(
+            os.path.join(os.path.dirname(__file__), "result"))
 
         for i in range(config.total_episodes):
             ep_num = i + 1

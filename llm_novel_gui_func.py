@@ -215,31 +215,60 @@ def generate_and_parse_progression() -> str:
 # 에피소드 파싱 및 테이블 빌드
 # -------------------------------------------------------------------------
 
-def split_episodes(text: str) -> list:
-    """## EPISODE N ## 패턴으로 텍스트를 에피소드 단위로 분리합니다.
+# 에피소드 헤더 통일 파서: '## EPISODE N ##', '##EPISODE N:', '**EPISODE N**',
+# 'EP N:' 등 모든 실사용 형식을 인식 (plot_gen 출력과 story_gen 출력 형식이 달라
+# 기존 '## EPISODE N ##' 전용 파서가 전체를 1개 에피소드로 오파싱하던 문제)
+EP_HEADER_PATTERN = re.compile(
+    r'^(?:##\s*)?(?:\*\*)?EP(?:ISODE)?\s*(\d+)(?:\s*##)?(?:\*\*)?\s*[#:]?\s*(.*)$',
+    re.IGNORECASE)
 
-    패턴이 하나도 없으면 전체 텍스트를 단일 에피소드로 반환합니다.
+
+def split_episodes(text: str) -> list:
+    """에피소드 헤더 패턴으로 텍스트를 분리합니다.
+
+    반환 리스트의 인덱스 i는 항상 EPISODE i+1에 대응합니다 (누락 번호는 "").
+    헤더가 하나도 없으면 전체 텍스트를 단일 에피소드로 반환합니다.
     빈 텍스트이면 빈 리스트를 반환합니다.
     """
     if not text or not text.strip():
         return []
-    pattern = r'(##\s*EPISODE\s*\d+\s*##)'
-    parts = re.split(pattern, text)
-    episodes = []
-    current_episode = ""
-    for part in parts:
-        if re.match(pattern, part):
-            if current_episode:
-                episodes.append(current_episode.strip())
-            current_episode = part + "\n"
-        else:
-            current_episode += part
-    if current_episode:
-        episodes.append(current_episode.strip())
-    # 패턴이 없으면 전체 텍스트를 단일 에피소드로 반환
-    if not episodes:
+    found = {}
+    current_num = None
+    current_lines = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        match = EP_HEADER_PATTERN.match(stripped)
+        if match:
+            if current_num is not None and current_lines:
+                found[current_num] = "\n".join(current_lines).strip()
+            current_num = int(match.group(1))
+            rest = match.group(2).strip().rstrip('*').rstrip('#').strip()
+            current_lines = [rest] if rest else []
+        elif current_num is not None and stripped:
+            current_lines.append(stripped)
+    if current_num is not None and current_lines:
+        found[current_num] = "\n".join(current_lines).strip()
+    if not found:
         return [text.strip()]
-    return episodes
+    # 번호 기준 배치: 인덱스 i = EPISODE i+1, 누락은 ""
+    max_num = max(found)
+    return [found.get(n, "") for n in range(1, max_num + 1)]
+
+
+def resolve_latest_result_dir(base: str = "result") -> str:
+    """result/latest 포인터가 가리키는 최신 run 디렉토리를 반환합니다.
+    포인터가 없거나 깨졌으면 base를 그대로 반환합니다 (과거 레이아웃 호환)."""
+    latest_pointer = os.path.join(base, "latest")
+    if os.path.isfile(latest_pointer):
+        try:
+            with open(latest_pointer, encoding="utf-8") as f:
+                run_id = f.read().strip()
+            run_dir = os.path.join(base, run_id)
+            if os.path.isdir(run_dir):
+                return run_dir
+        except OSError:
+            pass
+    return base
 
 
 def build_episode_full_track_table() -> str:
@@ -252,6 +281,7 @@ def build_episode_full_track_table() -> str:
       결 = result/episode_XX.md 파일 저장
     """
     total_eps = config.total_episodes
+    result_dir = resolve_latest_result_dir()
     lines = []
     lines.append("=== 스토리 생성 현황 (Episode Full Track) ===\n")
     lines.append(f"{'Ep':>4} | {'기':>4} | {'승':>4} | {'전':>4} | {'결':>4} | 상태")
@@ -262,7 +292,7 @@ def build_episode_full_track_table() -> str:
         has_summary = bool(config.episode_content[i].strip()) if i < len(config.episode_content) else False
         has_full_content = bool(config.episode_full_content[i].strip()) if i < len(config.episode_full_content) else False
         tracked = config.episode_full_track[i] if i < len(config.episode_full_track) else False
-        md_path = os.path.join("result", f"episode_{ep_num:02d}.md")
+        md_path = os.path.join(result_dir, f"episode_{ep_num:02d}.md")
         has_md_file = os.path.exists(md_path)
         status = "✓" if (tracked and (has_full_content or has_md_file)) else (" " if tracked else "?")
         lines.append(
@@ -331,15 +361,23 @@ def generate_episodes(callback=None):
             finally:
                 sys.stdout = old_stdout
 
+            config.reset_messages_history()  # run 간 스트리밍 이력 오염 방지
             episodes = split_episodes(plot_result)
             for i in range(total_eps):
                 config.episode_content[i] = episodes[i] if i < len(episodes) else ""
                 # 빈 에피소드를 완료로 기록하지 않는다 (거짓 완료 방지)
                 config.episode_track[i] = bool(config.episode_content[i].strip())
-            config.episode_gen_flag = True
+            missing = [i + 1 for i in range(total_eps) if not config.episode_track[i]]
+            config.episode_gen_flag = not missing
 
-            return {"success": True, "result_text": plot_result, "prog_msg": prog_msg}
+            if missing:
+                return {"success": False,
+                        "result_text": f"에피소드 누락: {missing}\n\n{plot_result}",
+                        "prog_msg": prog_msg, "missing_episodes": missing}
+            return {"success": True, "result_text": plot_result, "prog_msg": prog_msg,
+                    "missing_episodes": []}
         else:
+            config.reset_messages_history()  # run 간 스트리밍 이력 오염 방지
             old_stdout = sys.stdout
             sys.stdout = io.StringIO()
             try:
@@ -353,9 +391,15 @@ def generate_episodes(callback=None):
                 config.episode_content[i] = episodes[i] if i < len(episodes) else ""
                 # 빈 에피소드를 완료로 기록하지 않는다 (거짓 완료 방지)
                 config.episode_track[i] = bool(config.episode_content[i].strip())
-            config.episode_gen_flag = True
+            missing = [i + 1 for i in range(total_eps) if not config.episode_track[i]]
+            config.episode_gen_flag = not missing
 
-            return {"success": True, "result_text": result_text, "prog_msg": prog_msg}
+            if missing:
+                return {"success": False,
+                        "result_text": f"에피소드 누락: {missing}\n\n{result_text}",
+                        "prog_msg": prog_msg, "missing_episodes": missing}
+            return {"success": True, "result_text": result_text, "prog_msg": prog_msg,
+                    "missing_episodes": []}
 
     except Exception as e:
         return {"success": False, "result_text": str(e), "prog_msg": ""}
@@ -424,8 +468,9 @@ def generate_story(ep_num: int, callback=None):
 def export_config_to_file(filepath: str) -> str:
     """config 변수를 config.py 정의 순서대로 YAML 파일로 내보냅니다."""
     try:
+        # json_value는 제외: plot.json의 live 읽기(config.__getattr__)를
+        # 고정 스냅샷으로 덮어쓰고, 키 등 설정 파일 내용이 export 파일에 복제되는 문제
         export_order = [
-            "json_value",
             "total_episodes",
             "episode_content",
             "episode_track",
@@ -539,6 +584,11 @@ def restore_config_from_file(filepath: str) -> tuple:
         with open(filepath, "r", encoding="utf-8") as f:
             # yaml.FullLoader 사용: !!python/tuple 등 Python 전용 태그도 파싱
             saved_vars = yaml.load(f, Loader=yaml.FullLoader)
+        # json_value 복구 금지: setattr하면 module __getattr__의 live 읽기가
+        # 죽고 stale 스냅샷이 살아남 (importlib.reload로도 안 지워짐).
+        # 과거 export 파일에 남아 있을 수 있으므로 로드 시에도 무시 + 기존 shadow 제거.
+        saved_vars.pop("json_value", None)
+        config.__dict__.pop("json_value", None)
         for key, val in saved_vars.items():
             setattr(config, key, val)
         # YAML/JSON 직렬화 시 dict 키가 str로 바뀔 수 있으므로 int로 복원
@@ -573,16 +623,7 @@ def archive_to_done(result_dir: str = "result", comfyui_dir: str = None, done_di
         comfyui_dir = os.path.join(os.path.expanduser("~"), "AI", "ComfyUI", "output")
 
     # full_episode_gen이 result/<run_id>/에 저장하므로 latest 포인터로 최신 run을 해석
-    latest_pointer = os.path.join(result_dir, "latest")
-    if os.path.isfile(latest_pointer):
-        try:
-            with open(latest_pointer, encoding="utf-8") as f:
-                run_id = f.read().strip()
-            run_dir = os.path.join(result_dir, run_id)
-            if os.path.isdir(run_dir):
-                result_dir = run_dir
-        except Exception:
-            pass  # 포인터가 깨졌으면 기존 동작(result/ 직접) 유지
+    result_dir = resolve_latest_result_dir(result_dir)
 
     try:
         # 1. 다음 book 번호 결정 (기존 done/book{N}/ 중 최대 N+1)
@@ -1279,46 +1320,29 @@ def run_auto_sequence(
             finally:
                 sys.stdout = old_stdout
 
-            ep_header_pattern = re.compile(
-                r'(?:##\s*)?(?:\*\*)?EPISODE\s*(\d+)(?:\*\*)?\s*[#:]?\s*(.*)'
-            )
-            episodes_parsed_dict = {}
-            current_ep_num = None
-            current_ep_lines = []
-            for line in plot_result.split("\n"):
-                stripped = line.strip()
-                match = ep_header_pattern.match(stripped)
-                if match:
-                    if current_ep_num is not None and current_ep_lines:
-                        episodes_parsed_dict[current_ep_num] = "\n".join(current_ep_lines).strip()
-                    current_ep_num = int(match.group(1))
-                    rest = match.group(2).strip().rstrip("*").rstrip("#").strip()
-                    current_ep_lines = [rest] if rest else []
-                elif current_ep_num is not None and stripped:
-                    current_ep_lines.append(stripped)
-            if current_ep_num is not None and current_ep_lines:
-                episodes_parsed_dict[current_ep_num] = "\n".join(current_ep_lines).strip()
-
-            episodes_parsed = []
-            for i in range(1, total_eps + 1):
-                episodes_parsed.append(episodes_parsed_dict.get(i, ""))
+            # 통일 파서 사용 (중복 구현 제거) — 인덱스 i = EPISODE i+1
+            episodes_parsed = split_episodes(plot_result)
+            episodes_parsed = (episodes_parsed + [""] * total_eps)[:total_eps]
 
             for i in range(len(config.episode_content)):
-                if i < len(episodes_parsed):
-                    config.episode_content[i] = episodes_parsed[i]
-                else:
-                    config.episode_content[i] = ""
+                config.episode_content[i] = episodes_parsed[i] if i < len(episodes_parsed) else ""
+                config.episode_track[i] = bool(config.episode_content[i].strip())
 
+            auto_missing = [i + 1 for i in range(total_eps) if not config.episode_track[i]]
             result_lines = ["=== 생성된 에피소드 리스트 (Extended) ==="]
             result_lines.append(f"템플릿: {plot_gen.TEMPLATES[template_id]['name']}")
-            result_lines.append(f"총 {len(episodes_parsed)}개 에피소드 생성")
+            result_lines.append(f"총 {total_eps}개 중 {total_eps - len(auto_missing)}개 생성")
+            if auto_missing:
+                result_lines.append(f"누락 에피소드: {auto_missing}")
             result_lines.append("")
             for idx, ep in enumerate(episodes_parsed):
-                result_lines.append(f"Episode {idx + 1}: {ep}")
+                result_lines.append(f"Episode {idx + 1}: {ep if ep.strip() else '(누락)'}")
             result_lines.append("")
             config.result_text = "\n".join(result_lines)
-            config.episode_gen_flag = True
-            _menu1_logger.info(f"[10번] extended 에피소드 생성 완료 - {len(episodes_parsed)}개")
+            config.episode_gen_flag = not auto_missing
+            if auto_missing:
+                _menu1_logger.warning(f"[10번] extended 에피소드 누락: {auto_missing}")
+            _menu1_logger.info(f"[10번] extended 에피소드 생성 완료 - {total_eps - len(auto_missing)}개")
         else:
             # 표준 모드
             _menu1_logger.info(

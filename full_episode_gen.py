@@ -387,6 +387,12 @@ def full_episode_gen(ep_num=0, callback=None, log_file_name="debug_api_episode.l
         log_file.flush()
 
     try:
+        # 전체 생성(ep_num=0)은 새 run: 이전 run 디렉토리 덮어쓰기와
+        # 이전 대화 이력 오염을 방지 (-1 이어쓰기·단일 EP는 기존 run 유지)
+        if ep_num == 0:
+            config.current_run_id = ""
+            config.reset_messages_history()
+
         log("=" * 60)
         log(f"[full_episode_gen] 시작 시간: {time.strftime('%Y-%m-%d %H:%M:%S')}")
         log(f"에피소드 번호: {ep_num}")
@@ -901,6 +907,7 @@ def full_episode_gen(ep_num=0, callback=None, log_file_name="debug_api_episode.l
                 else:
                     another_feedback = "아주중요: 현재 에피소드는 초반이후이므로 편집자의 리뷰 반영할 것"
 
+                revised_map = {}
                 for sec_name, sec_content in valid_sections:
                     revise_prompt = _build_prompt(
                         prompts["revise_section"],
@@ -912,19 +919,29 @@ def full_episode_gen(ep_num=0, callback=None, log_file_name="debug_api_episode.l
                         name=config.name, episode_guide=episode_guide
                     )
                     log(f"[EP{current_ep}] [PROMPT_8_{sec_name}] '{sec_name}' 파트 재작성")
-                    revised_sec, messages = call_openai_for_plot(revise_prompt, messages=messages, log_fn=log)
+                    # 라벨·용어 누수는 재작성 산출물에서 실측된 문제이므로
+                    # 최종 재작성에도 품질 게이트를 적용한다
+                    revised_sec, messages = _generate_part_with_gate(
+                        sec_name, revise_prompt, messages, log, current_ep)
                     revised_sections.append(revised_sec)
+                    revised_map[sec_name] = revised_sec
                     log(f"[EP{current_ep}] [USER]\n{revise_prompt}...")
                     log(f"[EP{current_ep}] [AI]\n{revised_sec}...")
 
                 # 재작성된 기-승-전-결 하나로 합치기
                 revised_content = "\n\n----------------------------------\n#####\n\n".join(revised_sections)
 
-            # 수정된 내용 저장 — 완료 처리는 실제 내용 검증 후에만
-            config.episode_full_original_content[current_ep - 1] = chapter_content
-            config.episode_full_content[current_ep - 1] = revised_content
-            config.episode_full_track[current_ep - 1] = bool(revised_content.strip())
-            all_chapter_content.append(revised_content)
+            # 완료 판정: 네 섹션 존재 + 최소 분량 + 누수 0 (hard 기준)을 통과해야 완료
+            if agent_2nd == "yes":
+                final_sections = revised_map
+            else:
+                final_sections = {"기": part1_result, "승": part2_result,
+                                  "전": part3_result, "결": part4_result}
+            ep_ok, hard_issues, soft_issues = quality_gate.final_check(final_sections)
+            if soft_issues:
+                log(f"[EP{current_ep}] [FINAL_CHECK] 경고(완료 허용): {soft_issues}")
+            if not ep_ok:
+                log(f"[EP{current_ep}] [FINAL_CHECK] 미달(완료 아님): {hard_issues}")
 
             # 마크다운 파일 저장 (리뷰 전/후) — run 단위 디렉토리에 atomic write
             # (기존: result/ 고정 경로 "w" 덮어쓰기로 이전 실행 결과가 소실됐음)
@@ -940,11 +957,18 @@ def full_episode_gen(ep_num=0, callback=None, log_file_name="debug_api_episode.l
                 filepath_after = os.path.join(result_dir, filename_after)
                 _atomic_write(filepath_after, f"# Episode {current_ep}\n\n" + revised_content)
                 log(f"[EP{current_ep}] 리뷰 후 저장: {filepath_after}")
-                log(f"[EP{current_ep}] 완료 (기-승-전-결별 리뷰+수정 적용)")
-                _update_manifest(result_dir, current_ep, "completed_reviewed")
+                status = "completed_reviewed" if ep_ok else "incomplete_quality"
             else:
-                log(f"[EP{current_ep}] 완료 (리뷰/재작성 skip, 원문 markdown 출력)")
-                _update_manifest(result_dir, current_ep, "completed_raw")
+                status = "completed_raw" if ep_ok else "incomplete_quality"
+            _update_manifest(result_dir, current_ep, status)
+            log(f"[EP{current_ep}] {'완료' if ep_ok else '품질 기준 미달(재생성 필요)'} (status={status})")
+
+            # 완료 상태 커밋은 파일·manifest 저장이 성공한 뒤에만
+            # (기존: 저장 전에 track=True라서 디스크 실패 시에도 이어쓰기가 건너뜀)
+            config.episode_full_original_content[current_ep - 1] = chapter_content
+            config.episode_full_content[current_ep - 1] = revised_content
+            config.episode_full_track[current_ep - 1] = ep_ok and bool(revised_content.strip())
+            all_chapter_content.append(revised_content)
 
         final_result = "\n\n".join(all_chapter_content)
         log(f"[full_episode_gen] 완료 - 총 {len(all_chapter_content)}개 에피소드 생성")

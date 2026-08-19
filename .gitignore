@@ -9,5 +9,6 @@
 /order
 /result
 /done
+/data/config_export.yaml
 *.md
 !README.md

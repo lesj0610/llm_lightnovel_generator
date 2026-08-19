@@ -19,7 +19,7 @@
     "noimage": "yes",
 
     "debug_menu": "yes",
-    "log_prompts": "yes",
+    "log_prompts": "no",
 
     "ip_main_example": "localhost | 127.0.0.1 | 192.168.x.x",
     "port_main_example": "vLLM/llama.cpp 서버 포트",

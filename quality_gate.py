@@ -75,6 +75,29 @@ def check_section(text: str, sec_name: str = None) -> list:
     return issues
 
 
+def final_check(sections: dict) -> tuple:
+    """에피소드 완료 판정. sections는 {"기": 텍스트, "승": ..., "전": ..., "결": ...}.
+
+    hard(완료 차단): 섹션 누락/공백, 최소 분량 미달, 라벨·지시 용어 누수.
+    soft(경고만): 분량 초과, 동어반복 잔존.
+
+    Returns:
+        (ok: bool, hard_issues: list, soft_issues: list)
+    """
+    hard, soft = [], []
+    for name in ("기", "승", "전", "결"):
+        text = (sections.get(name) or "").strip()
+        if not text:
+            hard.append(f"'{name}' 섹션 누락")
+            continue
+        for issue in check_section(text, name):
+            if "미달" in issue or "노출" in issue:
+                hard.append(f"[{name}] {issue}")
+            else:
+                soft.append(f"[{name}] {issue}")
+    return (not hard), hard, soft
+
+
 def build_retry_prompt(sec_name: str, issues: list) -> str:
     """위반 사유를 해결 지시로 바꿔 재작성 프롬프트를 만듭니다."""
     issue_lines = "\n".join(f"- {i}" for i in issues)

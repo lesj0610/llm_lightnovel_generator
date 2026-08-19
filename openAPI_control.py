@@ -41,7 +41,10 @@ class LLMRequestError(Exception):
         self.attempts = attempts
 
 
-# 재시도 가능한 transient 상태 코드
+# 재시도 가능한 transient 상태 코드.
+# 5xx 전부가 아니라 408/409/429/500/502/503/504만 — 501(Not Implemented) 등은 영구 오류.
+# 참고: 로컬 vLLM/llama.cpp의 429는 과부하(재시도 가치 있음)뿐이라 quota성 429 구분은
+# 하지 않는다. 클라우드 API로 전환하면 insufficient_quota는 즉시 실패로 분기할 것.
 RETRYABLE_STATUS = {408, 409, 429, 500, 502, 503, 504}
 
 
@@ -72,13 +75,15 @@ def get_main_model(json_value=None) -> str:
     return jv.get("model_main", "Gemma 4 Flash Uncensored")
 
 
-def get_openai_client() -> OpenAI:
+def get_openai_client(jv=None) -> OpenAI:
     """Main LLM용 OpenAI 클라이언트를 생성하여 반환합니다.
 
-    plot.json은 한 번만 읽어 ip/port가 서로 다른 스냅샷에서 오는 것을 방지합니다.
+    jv(설정 스냅샷)를 전달하면 요청 전체가 같은 스냅샷을 사용합니다 —
+    모델명·host·port가 서로 다른 plot.json 읽기에서 오는 것을 방지.
     SDK 재시도는 끕니다 — 재시도는 _request_with_retry가 단독으로 소유합니다.
     """
-    jv = config.get_json_value()
+    if jv is None:
+        jv = config.get_json_value()
     return OpenAI(
         base_url="http://" + jv.get("ip_main", "localhost") + ":" + jv["port_main"] + "/v1",
         api_key=get_api_key(),
@@ -87,11 +92,11 @@ def get_openai_client() -> OpenAI:
 
 
 def _log_prompts_enabled(jv=None) -> bool:
-    """프롬프트/응답 전문 로깅 여부 (plot.json log_prompts, 기본 yes).
-    로그 파일이 공개 저장소에 커밋될 환경이라면 no로 두세요."""
+    """프롬프트/응답 전문 로깅 여부 (plot.json log_prompts, 기본 no — opt-in).
+    디버깅으로 전문이 필요할 때만 yes로 켜세요."""
     if jv is None:
         jv = config.get_json_value()
-    return config.flag_on(jv.get("log_prompts", "yes"))
+    return config.flag_on(jv.get("log_prompts", "no"))
 
 
 # =====================================================================
@@ -109,7 +114,7 @@ def _retry_delay_seconds(exc, attempt, base_delay):
     return base_delay * (2 ** attempt) + rand.uniform(0, 1)
 
 
-def _request_with_retry(create_kwargs, log_fn=None, max_retries=3, base_delay=2.0):
+def _request_with_retry(create_kwargs, log_fn=None, max_retries=3, base_delay=2.0, jv=None):
     """chat.completions.create를 재시도 정책과 함께 실행합니다.
 
     Returns:
@@ -117,7 +122,7 @@ def _request_with_retry(create_kwargs, log_fn=None, max_retries=3, base_delay=2.
     Raises:
         LLMRequestError: 영구 오류(즉시) 또는 재시도 소진 시.
     """
-    client = get_openai_client()
+    client = get_openai_client(jv)
     last_error = None
     for attempt in range(max_retries + 1):
         try:
@@ -159,12 +164,13 @@ def call_openai_api(prompt_text: str, callback=None, info_lines=None, log_fn=Non
         LLMRequestError: 요청 실패 시. 이력은 변형되지 않습니다.
     """
     temp = 0.9 + rand.randint(0, 1) / 10.0
+    jv = config.get_json_value()  # 요청 단위 단일 스냅샷 (모델·host·port 일관)
 
     request_messages = list(config.messages_history) + [
         {"role": "user", "content": prompt_text}]
 
     create_kwargs = {
-        "model": get_main_model(),
+        "model": get_main_model(jv),
         "messages": request_messages,
         "temperature": temp,
         "top_p": 0.95,
@@ -175,7 +181,7 @@ def call_openai_api(prompt_text: str, callback=None, info_lines=None, log_fn=Non
     if config.stream_enb:
         create_kwargs["stream_options"] = {"include_usage": True}
 
-    response = _request_with_retry(create_kwargs, log_fn=log_fn)
+    response = _request_with_retry(create_kwargs, log_fn=log_fn, jv=jv)
 
     if config.stream_enb:
         full_response = ""
@@ -276,7 +282,7 @@ def call_openai_for_plot(prompt_text: str, system_prompt: str = None, messages: 
         create_kwargs["reasoning_effort"] = reasoning_effort
 
     response = _request_with_retry(
-        create_kwargs, log_fn=log_fn, max_retries=max_retries, base_delay=retry_delay)
+        create_kwargs, log_fn=log_fn, max_retries=max_retries, base_delay=retry_delay, jv=jv)
 
     result = response.choices[0].message.content.strip()
     request_messages.append({"role": "assistant", "content": result})
