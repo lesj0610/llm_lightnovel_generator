@@ -98,6 +98,19 @@ def _fix_special_writing_req_keys() -> None:
         logger.info("special_writing_req 키 int 변환: %s", fixed)
 
 
+def _apply_saved_config_vars(saved_vars: dict) -> int:
+    """저장 파일의 변수를 config에 적용하는 공통 필터 (모든 복구 경로 필수 경유).
+
+    json_value는 항상 제외: setattr하면 module __getattr__의 live 읽기가 죽고
+    stale 스냅샷(과거 키 포함 가능)이 살아남는다. 기존 shadow도 함께 제거.
+    """
+    saved_vars.pop("json_value", None)
+    config.__dict__.pop("json_value", None)
+    for key, val in saved_vars.items():
+        setattr(config, key, val)
+    return len(saved_vars)
+
+
 def load_config_state() -> None:
     """JSON 파일에서 config 변수를 복구합니다."""
     if not os.path.exists(SAVE_STATE_FILE):
@@ -107,8 +120,7 @@ def load_config_state() -> None:
         with open(SAVE_STATE_FILE, "r", encoding="utf-8") as f:
             content = f.read()
             saved_vars = json.loads(content)
-        for key, val in saved_vars.items():
-            setattr(config, key, val)
+        _apply_saved_config_vars(saved_vars)
         # JSON 직렬화 시 dict 키가 str로 바뀌므로 int로 복원
         _fix_special_writing_req_keys()
         logger.info("Config 복구 성공: %s (%d개 변수)", SAVE_STATE_FILE, len(saved_vars))
@@ -163,8 +175,7 @@ def load_config_export() -> str:
         if not exported_vars:
             logger.debug("config_export.yaml이 비어 있음")
             return ""
-        for key, val in exported_vars.items():
-            setattr(config, key, val)
+        _apply_saved_config_vars(exported_vars)  # json_value shadow 차단 공통 필터
         # YAML에도 int 키가 str로 저장될 수 있으므로 복원
         _fix_special_writing_req_keys()
         logger.info("config_export.yaml에서 %d개 변수 로드 완료", len(exported_vars))
@@ -215,31 +226,60 @@ def generate_and_parse_progression() -> str:
 # 에피소드 파싱 및 테이블 빌드
 # -------------------------------------------------------------------------
 
-def split_episodes(text: str) -> list:
-    """## EPISODE N ## 패턴으로 텍스트를 에피소드 단위로 분리합니다.
+# 에피소드 헤더 통일 파서: '## EPISODE N ##', '##EPISODE N:', '**EPISODE N**',
+# 'EP N:' 등 모든 실사용 형식을 인식 (plot_gen 출력과 story_gen 출력 형식이 달라
+# 기존 '## EPISODE N ##' 전용 파서가 전체를 1개 에피소드로 오파싱하던 문제)
+EP_HEADER_PATTERN = re.compile(
+    r'^(?:##\s*)?(?:\*\*)?EP(?:ISODE)?\s*(\d+)(?:\s*##)?(?:\*\*)?\s*[#:]?\s*(.*)$',
+    re.IGNORECASE)
 
-    패턴이 하나도 없으면 전체 텍스트를 단일 에피소드로 반환합니다.
+
+def split_episodes(text: str) -> list:
+    """에피소드 헤더 패턴으로 텍스트를 분리합니다.
+
+    반환 리스트의 인덱스 i는 항상 EPISODE i+1에 대응합니다 (누락 번호는 "").
+    헤더가 하나도 없으면 전체 텍스트를 단일 에피소드로 반환합니다.
     빈 텍스트이면 빈 리스트를 반환합니다.
     """
     if not text or not text.strip():
         return []
-    pattern = r'(##\s*EPISODE\s*\d+\s*##)'
-    parts = re.split(pattern, text)
-    episodes = []
-    current_episode = ""
-    for part in parts:
-        if re.match(pattern, part):
-            if current_episode:
-                episodes.append(current_episode.strip())
-            current_episode = part + "\n"
-        else:
-            current_episode += part
-    if current_episode:
-        episodes.append(current_episode.strip())
-    # 패턴이 없으면 전체 텍스트를 단일 에피소드로 반환
-    if not episodes:
+    found = {}
+    current_num = None
+    current_lines = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        match = EP_HEADER_PATTERN.match(stripped)
+        if match:
+            if current_num is not None and current_lines:
+                found[current_num] = "\n".join(current_lines).strip()
+            current_num = int(match.group(1))
+            rest = match.group(2).strip().rstrip('*').rstrip('#').strip()
+            current_lines = [rest] if rest else []
+        elif current_num is not None and stripped:
+            current_lines.append(stripped)
+    if current_num is not None and current_lines:
+        found[current_num] = "\n".join(current_lines).strip()
+    if not found:
         return [text.strip()]
-    return episodes
+    # 번호 기준 배치: 인덱스 i = EPISODE i+1, 누락은 ""
+    max_num = max(found)
+    return [found.get(n, "") for n in range(1, max_num + 1)]
+
+
+def resolve_latest_result_dir(base: str = "result") -> str:
+    """result/latest 포인터가 가리키는 최신 run 디렉토리를 반환합니다.
+    포인터가 없거나 깨졌으면 base를 그대로 반환합니다 (과거 레이아웃 호환)."""
+    latest_pointer = os.path.join(base, "latest")
+    if os.path.isfile(latest_pointer):
+        try:
+            with open(latest_pointer, encoding="utf-8") as f:
+                run_id = f.read().strip()
+            run_dir = os.path.join(base, run_id)
+            if os.path.isdir(run_dir):
+                return run_dir
+        except OSError:
+            pass
+    return base
 
 
 def build_episode_full_track_table() -> str:
@@ -252,6 +292,7 @@ def build_episode_full_track_table() -> str:
       결 = result/episode_XX.md 파일 저장
     """
     total_eps = config.total_episodes
+    result_dir = resolve_latest_result_dir()
     lines = []
     lines.append("=== 스토리 생성 현황 (Episode Full Track) ===\n")
     lines.append(f"{'Ep':>4} | {'기':>4} | {'승':>4} | {'전':>4} | {'결':>4} | 상태")
@@ -262,7 +303,7 @@ def build_episode_full_track_table() -> str:
         has_summary = bool(config.episode_content[i].strip()) if i < len(config.episode_content) else False
         has_full_content = bool(config.episode_full_content[i].strip()) if i < len(config.episode_full_content) else False
         tracked = config.episode_full_track[i] if i < len(config.episode_full_track) else False
-        md_path = os.path.join("result", f"episode_{ep_num:02d}.md")
+        md_path = os.path.join(result_dir, f"episode_{ep_num:02d}.md")
         has_md_file = os.path.exists(md_path)
         status = "✓" if (tracked and (has_full_content or has_md_file)) else (" " if tracked else "?")
         lines.append(
@@ -331,14 +372,23 @@ def generate_episodes(callback=None):
             finally:
                 sys.stdout = old_stdout
 
+            config.reset_messages_history()  # run 간 스트리밍 이력 오염 방지
             episodes = split_episodes(plot_result)
             for i in range(total_eps):
                 config.episode_content[i] = episodes[i] if i < len(episodes) else ""
-                config.episode_track[i] = True
-            config.episode_gen_flag = True
+                # 빈 에피소드를 완료로 기록하지 않는다 (거짓 완료 방지)
+                config.episode_track[i] = bool(config.episode_content[i].strip())
+            missing = [i + 1 for i in range(total_eps) if not config.episode_track[i]]
+            config.episode_gen_flag = not missing
 
-            return {"success": True, "result_text": plot_result, "prog_msg": prog_msg}
+            if missing:
+                return {"success": False,
+                        "result_text": f"에피소드 누락: {missing}\n\n{plot_result}",
+                        "prog_msg": prog_msg, "missing_episodes": missing}
+            return {"success": True, "result_text": plot_result, "prog_msg": prog_msg,
+                    "missing_episodes": []}
         else:
+            config.reset_messages_history()  # run 간 스트리밍 이력 오염 방지
             old_stdout = sys.stdout
             sys.stdout = io.StringIO()
             try:
@@ -350,10 +400,17 @@ def generate_episodes(callback=None):
             episodes = split_episodes(result_text)
             for i in range(total_eps):
                 config.episode_content[i] = episodes[i] if i < len(episodes) else ""
-                config.episode_track[i] = True
-            config.episode_gen_flag = True
+                # 빈 에피소드를 완료로 기록하지 않는다 (거짓 완료 방지)
+                config.episode_track[i] = bool(config.episode_content[i].strip())
+            missing = [i + 1 for i in range(total_eps) if not config.episode_track[i]]
+            config.episode_gen_flag = not missing
 
-            return {"success": True, "result_text": result_text, "prog_msg": prog_msg}
+            if missing:
+                return {"success": False,
+                        "result_text": f"에피소드 누락: {missing}\n\n{result_text}",
+                        "prog_msg": prog_msg, "missing_episodes": missing}
+            return {"success": True, "result_text": result_text, "prog_msg": prog_msg,
+                    "missing_episodes": []}
 
     except Exception as e:
         return {"success": False, "result_text": str(e), "prog_msg": ""}
@@ -391,27 +448,46 @@ def generate_story(ep_num: int, callback=None):
     Returns:
         dict: {"success": bool, "out_txt": str, "mode_text": str}
     """
+    mode_text = "전체 재생성" if ep_num == 0 else "이어서 생성" if ep_num == -1 else f"EP {ep_num} 단일 생성"
     try:
-        mode_text = "전체 재생성" if ep_num == 0 else "이어서 생성" if ep_num == -1 else f"EP {ep_num} 단일 생성"
-        result = full_episode_gen.full_episode_gen(ep_num=ep_num, callback=callback)
+        full_episode_gen.full_episode_gen(ep_num=ep_num, callback=callback)
         table = build_episode_full_track_table()
-        out_txt = f"{table}"
 
-        return {"success": True, "out_txt": out_txt, "mode_text": mode_text}
+        # 요청 범위의 실제 완료 여부를 검증 (거짓 성공 방지)
+        if ep_num > 0:
+            requested = [ep_num]
+        else:
+            requested = list(range(1, config.total_episodes + 1))
+        missing = [n for n in requested
+                   if not (config.episode_full_track[n - 1]
+                           and config.episode_full_content[n - 1].strip())]
+        if missing:
+            return {"success": False, "out_txt": f"{table}\n\n미완료 에피소드: {missing}",
+                    "mode_text": mode_text, "missing_episodes": missing}
+        return {"success": True, "out_txt": f"{table}", "mode_text": mode_text,
+                "missing_episodes": []}
 
     except Exception as e:
-        return {"success": False, "out_txt": str(e), "mode_text": ""}
+        table = build_episode_full_track_table()
+        return {"success": False, "out_txt": f"{e}\n\n{table}", "mode_text": mode_text}
 
 
 # -------------------------------------------------------------------------
 # Config 파일 내보내기/복구
 # -------------------------------------------------------------------------
 
-def export_config_to_file(filepath: str) -> str:
-    """config 변수를 config.py 정의 순서대로 YAML 파일로 내보냅니다."""
+def export_config_to_file(filepath: str) -> tuple:
+    """config 변수를 config.py 정의 순서대로 YAML 파일로 내보냅니다.
+
+    Returns:
+        (success: bool, message: str) — 실패를 문자열로 위장하지 않는다.
+    """
+    # 반환 계약: (success: bool, message: str)
+    tmp_path = None
     try:
+        # json_value는 제외: plot.json의 live 읽기(config.__getattr__)를
+        # 고정 스냅샷으로 덮어쓰고, 키 등 설정 파일 내용이 export 파일에 복제되는 문제
         export_order = [
-            "json_value",
             "total_episodes",
             "episode_content",
             "episode_track",
@@ -426,6 +502,9 @@ def export_config_to_file(filepath: str) -> str:
             "personality2", "outfit2", "talking_style2",
             "hair_color", "hair_style", "eye_color", "eye_shape", "skin_color",
             "face_style", "acc", "clothes",
+            # character.json/LLM이 만든 자유 서술 (저장 누락 시 소설 묘사에서 사라짐)
+            "appearance_note", "appearance_note2",
+            "personality_note", "personality_note2",
             "breasts_size", "hip_size", "body_size",
             "bimbo_clothes1", "bimbo_clothes2",
             "love_value",
@@ -499,30 +578,45 @@ def export_config_to_file(filepath: str) -> str:
             val = getattr(config, var, None)
             if val is not None:
                 vars_dict[var] = val
-        # 기존 파일 삭제 후 새로 생성
-        if os.path.exists(filepath):
-            os.remove(filepath)
-        with open(filepath, "w", encoding="utf-8") as f:
+        # 고유한 임시 파일에 완전히 쓴 뒤 원자적으로 교체 —
+        # 기존 파일을 먼저 삭제하면 직렬화/쓰기 실패 시 마지막 정상 복구 파일도 소실됨
+        import tempfile
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            prefix=os.path.basename(filepath) + ".",
+            suffix=".tmp", dir=os.path.dirname(filepath) or ".")
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
             yaml.dump(vars_dict, f, allow_unicode=True, default_flow_style=False,
                       sort_keys=False, width=120)
+        os.replace(tmp_path, filepath)
+        tmp_path = None  # 교체 완료 — finally 정리 대상 아님
         logger.info("설정 내보내기 성공: %s (%d개 변수)", filepath, len(vars_dict))
-        return f"설정 내보내기 성공: {filepath}"
+        return True, f"설정 내보내기 성공: {filepath}"
     except Exception as e:
         logger.error("설정 내보내기 실패: %s", e)
-        return f"설정 내보내기 실패: {e}"
+        return False, f"설정 내보내기 실패: {e}"
+    finally:
+        # 실패 시 부분 내용이 담긴 임시 파일을 남기지 않는다
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
 
-def restore_config_from_file(filepath: str) -> str:
-    """지정된 파일에서 config 변수를 복구합니다 (YAML/JSON 호환)."""
+def restore_config_from_file(filepath: str) -> tuple:
+    """지정된 파일에서 config 변수를 복구합니다 (YAML/JSON 호환).
+
+    Returns:
+        (success: bool, message: str) — 실패를 문자열로 위장하지 않는다.
+    """
     if not os.path.exists(filepath):
         logger.warning("복구 파일을 찾을 수 없음: %s", filepath)
-        return f"파일을 찾을 수 없습니다: {filepath}"
+        return False, f"파일을 찾을 수 없습니다: {filepath}"
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             # yaml.FullLoader 사용: !!python/tuple 등 Python 전용 태그도 파싱
             saved_vars = yaml.load(f, Loader=yaml.FullLoader)
-        for key, val in saved_vars.items():
-            setattr(config, key, val)
+        _apply_saved_config_vars(saved_vars)  # json_value shadow 차단 공통 필터
         # YAML/JSON 직렬화 시 dict 키가 str로 바뀔 수 있으므로 int로 복원
         _fix_special_writing_req_keys()
         logger.info("설정 복구 성공: %s (총 %d개 변수)", filepath, len(saved_vars))
@@ -534,14 +628,20 @@ def restore_config_from_file(filepath: str) -> str:
                 logger.info("[RESTORE_CHECK] EP%d special_writing_req: %s (키 타입: %s)", ep_num, actions, type(ep_num).__name__)
         else:
             logger.info("[RESTORE_CHECK] special_writing_req가 비어있음")
-        return f"설정 복구 성공: {filepath} (총 {len(saved_vars)}개 변수)"
+        return True, f"설정 복구 성공: {filepath} (총 {len(saved_vars)}개 변수)"
     except Exception as e:
         logger.error("설정 복구 실패: %s", e)
-        return f"설정 복구 실패: {e}"
+        return False, f"설정 복구 실패: {e}"
 
 
-def archive_to_done(result_dir: str = "result", comfyui_dir: str = None, done_dir: str = "done") -> str:
-    """전체 자동 실행 완료 후 result/의 markdown과 ComfyUI output의 png를 done/book{N}/로 아카이브.
+# PNG 아카이브 활성 스위치. 현재 noimage 워크플로라 비활성 —
+# True로 바꾸면 ComfyUI 큐 대기와 PNG 복사가 함께 동작한다.
+ARCHIVE_PNG = False
+
+
+def archive_to_done(result_dir: str = "result", comfyui_dir: str = None, done_dir: str = "done") -> tuple:
+    """전체 자동 실행 완료 후 result/의 markdown을 done/book{N}/로 아카이브.
+    (ARCHIVE_PNG=True이면 ComfyUI output의 png도 함께 아카이브)
 
     Args:
         result_dir: 마크다운 파일이 있는 디렉토리 (기본 "result")
@@ -549,10 +649,13 @@ def archive_to_done(result_dir: str = "result", comfyui_dir: str = None, done_di
         done_dir: 아카이브 대상 디렉토리 (기본 "done")
 
     Returns:
-        결과 메시지 문자열
+        (success: bool, message: str)
     """
     if comfyui_dir is None:
         comfyui_dir = os.path.join(os.path.expanduser("~"), "AI", "ComfyUI", "output")
+
+    # full_episode_gen이 result/<run_id>/에 저장하므로 latest 포인터로 최신 run을 해석
+    result_dir = resolve_latest_result_dir(result_dir)
 
     try:
         # 1. 다음 book 번호 결정 (기존 done/book{N}/ 중 최대 N+1)
@@ -584,49 +687,94 @@ def archive_to_done(result_dir: str = "result", comfyui_dir: str = None, done_di
                     md_count += 1
                     logger.info("아카이브: %s -> %s", src, dst)
 
-        # 3. ComfyUI 큐가 비어질 때까지 HTTP API 폴링으로 대기
-        logger.info("ComfyUI 큐 대기 시작...")
-        try:
-            import time
-            import json
-            import urllib.request
+        # 3~4. PNG 아카이브 (ARCHIVE_PNG=True일 때만: 큐 대기 + PNG 복사)
+        # PNG를 복사하지 않으면서 큐만 최대 15분 기다리던 낭비 제거
+        png_count = 0
+        if ARCHIVE_PNG:
+            logger.info("ComfyUI 큐 대기 시작...")
+            try:
+                import time
+                import json
+                import urllib.request
 
-            # HTTP API로 큐 상태를 30초마다 확인 (최대 30회 = 15분)
-            for poll in range(30):
-                try:
-                    with urllib.request.urlopen("http://127.0.0.1:8188/queue", timeout=5) as resp:
-                        queue_data = json.loads(resp.read())
-                    running = len(queue_data.get("queue_running", []))
-                    pending = len(queue_data.get("queue_pending", []))
-                    remaining = running + pending
-                    if remaining == 0:
-                        logger.info("ComfyUI 큐 비었음 - 60초 대기 후 파일 복사")
-                        time.sleep(60)
-                        break
-                    logger.info(f"ComfyUI 큐: running={running}, pending={pending} (남은 {remaining}개, {poll+1}/30회)")
-                except Exception as e:
-                    logger.info(f"ComfyUI 큐 확인 실패: {e}")
-                time.sleep(30)
-        except Exception as e:
-            logger.info(f"ComfyUI 큐 대기 실패: {e} - 즉시 파일 복사")
+                # HTTP API로 큐 상태를 30초마다 확인 (최대 30회 = 15분)
+                for poll in range(30):
+                    try:
+                        with urllib.request.urlopen("http://127.0.0.1:8188/queue", timeout=5) as resp:
+                            queue_data = json.loads(resp.read())
+                        running = len(queue_data.get("queue_running", []))
+                        pending = len(queue_data.get("queue_pending", []))
+                        remaining = running + pending
+                        if remaining == 0:
+                            logger.info("ComfyUI 큐 비었음 - 60초 대기 후 파일 복사")
+                            time.sleep(60)
+                            break
+                        logger.info(f"ComfyUI 큐: running={running}, pending={pending} (남은 {remaining}개, {poll+1}/30회)")
+                    except Exception as e:
+                        logger.info(f"ComfyUI 큐 확인 실패: {e}")
+                    time.sleep(30)
+            except Exception as e:
+                logger.info(f"ComfyUI 큐 대기 실패: {e} - 즉시 파일 복사")
 
-        ## 4. ComfyUI output의 .png 파일 복사 (하위 디렉토리 포함)
-        #png_count = 0
-        #if os.path.exists(comfyui_dir):
-        #    for root, dirs, files in os.walk(comfyui_dir):
-        #        for fname in files:
-        #            if fname.lower().endswith(".png"):
-        #                src = os.path.join(root, fname)
-        #                dst = os.path.join(dest_dir, fname)
-        #                import shutil
-        #                shutil.copy2(src, dst)
-        #                png_count += 1
+            if os.path.exists(comfyui_dir):
+                import shutil
+                for root, dirs, files in os.walk(comfyui_dir):
+                    for fname in files:
+                        if fname.lower().endswith(".png"):
+                            src = os.path.join(root, fname)
+                            # 상대 경로 보존: 하위 디렉토리별 동명 파일이
+                            # 평탄화로 조용히 덮어써지는 문제 방지
+                            rel = os.path.relpath(src, comfyui_dir)
+                            dst = os.path.join(dest_dir, rel)
+                            os.makedirs(os.path.dirname(dst), exist_ok=True)
+                            shutil.copy2(src, dst)
+                            png_count += 1
 
-        logger.info("아카이브 완료: %s (md=%d, png=%d)", dest_dir, md_count, png_count)
-        return f"아카이브 완료: {dest_dir} (markdown={md_count}개, png={png_count}개)"
+        png_note = f", png={png_count}개" if ARCHIVE_PNG else " (PNG 아카이브 비활성)"
+        logger.info("아카이브 완료: %s (md=%d%s)", dest_dir, md_count, png_note)
+        return True, f"아카이브 완료: {dest_dir} (markdown={md_count}개{png_note})"
     except Exception as e:
         logger.error("아카이브 실패: %s", e)
-        return f"아카이브 실패: {e}"
+        return False, f"아카이브 실패: {e}"
+
+
+def _finalize_auto_run(cb, anima_enb, current_file_index):
+    """자동 실행 마지막 단계: 아카이브 수행 후 결과에 맞는 본문을 처음부터 구성.
+
+    완료 선언([전체 자동 실행 완료] 헤더, 완료 로그, 완료 콜백)은 아카이브까지
+    성공했을 때만 만든다 — 실패 본문에 완료 문구가 섞이는 모순 방지.
+    """
+    base_steps = ("1. 초기화 완료\n\n2. 1번: 플롯 생성 완료\n\n"
+                  "3. 4번: 에피소드 생성 완료\n\n4. 6번: 스토리 생성 완료")
+    if anima_enb:
+        base_steps += "\n\n5. ANIMA 이미지 생성 완료"
+
+    _menu1_logger.info("[10번] 아카이브 시작...")
+    archive_ok, archive_msg = archive_to_done()
+    _menu1_logger.info(archive_msg)
+
+    if not archive_ok:
+        _menu1_logger.warning(f"[10번] 아카이브 실패 — 부분 완료로 종료: {archive_msg}")
+        content_text = (f"[전체 자동 실행 부분 완료 — 아카이브 실패]\n\n{base_steps}\n\n"
+                        f"6. 아카이브 실패: {archive_msg}\n"
+                        f"(생성 결과는 result/에 남아 있습니다)")
+        cb("done", "부분 완료 (아카이브 실패)", content_text)
+        return {
+            "success": False,
+            "content_text": content_text,
+            "current_file_index": current_file_index,
+        }
+
+    _menu1_logger.info("[10번] 전체 자동 실행 완료!")
+    content_text = (f"[전체 자동 실행 완료]\n\n{base_steps}\n\n"
+                    f"총 {config.total_episodes}개의 에피소드가 result/ 디렉토리에 저장되었습니다.\n\n"
+                    f"6. {archive_msg}")
+    cb("done", "전체 자동 실행 완료", content_text)
+    return {
+        "success": True,
+        "content_text": content_text,
+        "current_file_index": current_file_index,
+    }
 
 
 # -------------------------------------------------------------------------
@@ -1167,7 +1315,9 @@ def run_auto_sequence(
             complete_theme_auto()
             _menu1_logger.info(f"[10번] theme_auto 1번 완료 저장됨 (hash={config.plot_hash})")
 
-        export_config_to_file(export_path)
+        export_ok, export_msg = export_config_to_file(export_path)
+        if not export_ok:
+            raise RuntimeError(f"복구 상태 저장 실패: {export_msg} — 자동 실행을 중단합니다")
         cb("init", "초기화 완료", "[전체 자동 실행]\n\n1. 초기화 완료")
 
         # =========================================================
@@ -1208,7 +1358,9 @@ def run_auto_sequence(
             config.plot_result = plot_text + f"\n\n[업데이트된 테마]\n{theme_result['theme']}"
             _menu1_logger.info("[10번] theme_agent 업데이트 완료")
 
-        export_config_to_file(export_path)
+        export_ok, export_msg = export_config_to_file(export_path)
+        if not export_ok:
+            raise RuntimeError(f"복구 상태 저장 실패: {export_msg} — 자동 실행을 중단합니다")
         cb("plot", "1번: 플롯 생성 완료", "[전체 자동 실행]\n\n1. 초기화 완료\n\n2. 1번: 플롯 생성 완료")
 
         # =========================================================
@@ -1249,46 +1401,31 @@ def run_auto_sequence(
             finally:
                 sys.stdout = old_stdout
 
-            ep_header_pattern = re.compile(
-                r'(?:##\s*)?(?:\*\*)?EPISODE\s*(\d+)(?:\*\*)?\s*[#:]?\s*(.*)'
-            )
-            episodes_parsed_dict = {}
-            current_ep_num = None
-            current_ep_lines = []
-            for line in plot_result.split("\n"):
-                stripped = line.strip()
-                match = ep_header_pattern.match(stripped)
-                if match:
-                    if current_ep_num is not None and current_ep_lines:
-                        episodes_parsed_dict[current_ep_num] = "\n".join(current_ep_lines).strip()
-                    current_ep_num = int(match.group(1))
-                    rest = match.group(2).strip().rstrip("*").rstrip("#").strip()
-                    current_ep_lines = [rest] if rest else []
-                elif current_ep_num is not None and stripped:
-                    current_ep_lines.append(stripped)
-            if current_ep_num is not None and current_ep_lines:
-                episodes_parsed_dict[current_ep_num] = "\n".join(current_ep_lines).strip()
-
-            episodes_parsed = []
-            for i in range(1, total_eps + 1):
-                episodes_parsed.append(episodes_parsed_dict.get(i, ""))
+            # 통일 파서 사용 (중복 구현 제거) — 인덱스 i = EPISODE i+1
+            episodes_parsed = split_episodes(plot_result)
+            episodes_parsed = (episodes_parsed + [""] * total_eps)[:total_eps]
 
             for i in range(len(config.episode_content)):
-                if i < len(episodes_parsed):
-                    config.episode_content[i] = episodes_parsed[i]
-                else:
-                    config.episode_content[i] = ""
+                config.episode_content[i] = episodes_parsed[i] if i < len(episodes_parsed) else ""
+                config.episode_track[i] = bool(config.episode_content[i].strip())
 
+            auto_missing = [i + 1 for i in range(total_eps) if not config.episode_track[i]]
             result_lines = ["=== 생성된 에피소드 리스트 (Extended) ==="]
             result_lines.append(f"템플릿: {plot_gen.TEMPLATES[template_id]['name']}")
-            result_lines.append(f"총 {len(episodes_parsed)}개 에피소드 생성")
+            result_lines.append(f"총 {total_eps}개 중 {total_eps - len(auto_missing)}개 생성")
+            if auto_missing:
+                result_lines.append(f"누락 에피소드: {auto_missing}")
             result_lines.append("")
             for idx, ep in enumerate(episodes_parsed):
-                result_lines.append(f"Episode {idx + 1}: {ep}")
+                result_lines.append(f"Episode {idx + 1}: {ep if ep.strip() else '(누락)'}")
             result_lines.append("")
             config.result_text = "\n".join(result_lines)
-            config.episode_gen_flag = True
-            _menu1_logger.info(f"[10번] extended 에피소드 생성 완료 - {len(episodes_parsed)}개")
+            config.episode_gen_flag = not auto_missing
+            if auto_missing:
+                # 요약 누락 상태로 스토리 생성을 진행하면 빈 에피소드가 연쇄됨 — 중단
+                _menu1_logger.warning(f"[10번] extended 에피소드 누락: {auto_missing} — 자동 실행 중단")
+                raise RuntimeError(f"에피소드 생성 누락: {auto_missing} — 자동 실행을 중단합니다")
+            _menu1_logger.info(f"[10번] extended 에피소드 생성 완료 - {total_eps}개")
         else:
             # 표준 모드
             _menu1_logger.info(
@@ -1317,13 +1454,23 @@ def run_auto_sequence(
                 content_preview = config.episode_content[i][:60] if config.episode_content[i] else "EMPTY"
                 _menu1_logger.info(f"[10번] episode_content[{i}]: {content_preview}...")
 
+            # 표준 모드도 누락 검증 (extended와 동일한 중단 계약)
+            std_missing = [i + 1 for i in range(config.total_episodes)
+                           if i >= len(config.episode_content)
+                           or not (config.episode_content[i] or "").strip()]
+            if std_missing or not config.episode_gen_flag:
+                _menu1_logger.warning(f"[10번] 표준 모드 에피소드 누락: {std_missing} — 자동 실행 중단")
+                raise RuntimeError(f"에피소드 생성 누락(표준 모드): {std_missing} — 자동 실행을 중단합니다")
+
         # 에피소드 내용과 캐릭터 시트를 progress 디렉토리에 저장
         plot_hash = getattr(config, 'plot_hash', '')
         if plot_hash:
             saved_ep_files = save_episodes_and_sheets_to_progress(plot_hash)
             _menu1_logger.info(f"[10번] progress 저장 완료: {len(saved_ep_files)}개 파일")
 
-        export_config_to_file(export_path)
+        export_ok, export_msg = export_config_to_file(export_path)
+        if not export_ok:
+            raise RuntimeError(f"복구 상태 저장 실패: {export_msg} — 자동 실행을 중단합니다")
         cb("episode", "4번: 에피소드 생성 완료", "[전체 자동 실행]\n\n1. 초기화 완료\n\n2. 1번: 플롯 생성 완료\n\n3. 4번: 에피소드 생성 완료")
 
         # =========================================================
@@ -1344,6 +1491,14 @@ def run_auto_sequence(
 
         final_result = full_episode_gen.full_episode_gen(ep_num=0, callback=stream_callback)
         _menu1_logger.info(f"[10번] full_episode_gen 완료 - episode_full_track={list(config.episode_full_track)}")
+
+        # 스토리 전 에피소드 완료 검증 — 미완료가 있으면 완료 선언·아카이브 금지
+        story_missing = [i + 1 for i in range(config.total_episodes)
+                         if not config.episode_full_track[i]]
+        if story_missing:
+            _menu1_logger.warning(f"[10번] 스토리 미완료 에피소드: {story_missing} — 자동 실행 중단")
+            raise RuntimeError(
+                f"스토리 미완료 에피소드: {story_missing} (생성 실패 또는 품질 기준 미달) — 자동 실행을 중단합니다")
         cb("story", "6번: 스토리 생성 완료", "[전체 자동 실행]\n\n1. 초기화 완료\n\n2. 1번: 플롯 생성 완료\n\n3. 4번: 에피소드 생성 완료\n\n4. 6번: 스토리 생성 완료")
 
         # =========================================================
@@ -1360,28 +1515,23 @@ def run_auto_sequence(
             )
 
             if not anima_result["success"]:
-                _menu1_logger.info(f"[10번] ANIMA 생성 오류: {anima_result['progress_log'][-1]}")
+                anima_error = (anima_result.get('progress_log') or ["원인 미상"])[-1]
+                _menu1_logger.warning(f"[10번] ANIMA 생성 실패: {anima_error} — 부분 완료로 종료 (아카이브 생략)")
+                content_text = (f"[전체 자동 실행 부분 완료 — ANIMA 실패]\n\n"
+                                f"1~4단계(플롯·에피소드·스토리)는 완료됐고 result/에 저장됐습니다.\n"
+                                f"5. ANIMA 생성 실패: {anima_error}\n\n"
+                                f"아카이브는 수행하지 않았습니다. ANIMA 재실행 후 아카이브하세요.")
+                cb("done", "부분 완료 (ANIMA 실패)", content_text)
+                return {
+                    "success": False,
+                    "content_text": content_text,
+                    "current_file_index": current_file_index,
+                }
 
         # =========================================================
-        # 완료
+        # 마무리: 아카이브 → 성공 시에만 전체 완료 선언
         # =========================================================
-        _menu1_logger.info("[10번] 전체 자동 실행 완료!")
-        content_text = f"[전체 자동 실행 완료]\n\n1. 초기화 완료\n\n2. 1번: 플롯 생성 완료\n\n3. 4번: 에피소드 생성 완료\n\n4. 6번: 스토리 생성 완료\n\n총 {config.total_episodes}개의 에피소드가 result/ 디렉토리에 저장되었습니다."
-        if anima_enb:
-            content_text += "\n\n5. ANIMA 이미지 생성 완료"
-
-        # 아카이브: result/의 markdown과 ComfyUI output의 png를 done/book{N}/로 이동
-        _menu1_logger.info("[10번] 아카이브 시작...")
-        archive_result = archive_to_done()
-        _menu1_logger.info(archive_result)
-        content_text += f"\n\n6. 아카이브 완료: {archive_result}"
-        cb("done", "전체 자동 실행 완료", content_text)
-
-        return {
-            "success": True,
-            "content_text": content_text,
-            "current_file_index": current_file_index,
-        }
+        return _finalize_auto_run(cb, anima_enb, current_file_index)
 
     except Exception as e:
         import traceback

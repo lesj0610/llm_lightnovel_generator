@@ -64,8 +64,8 @@ class LLMNovelGUI:
         except Exception as e:
             self.content_text = f"테마 생성 중 오류 발생: {e}"
 
-        # ANIMA 활성화 여부 확인
-        self.anima_enb = bool(config.json_value.get("anima_enb", False))
+        # ANIMA 활성화 여부 확인 (bool("no")는 True라서 문자열 불리언은 flag_on으로 판정)
+        self.anima_enb = config.flag_on(config.json_value.get("anima_enb", "no"))
         
         self.menu_items: List[str] = [
             "1. 플롯 생성 (Generate Plot)",
@@ -396,13 +396,14 @@ class LLMNovelGUI:
         else:
             self.scroll_offset = 0
 
-    def _export_config_to_file(self, filepath: str) -> str:
+    def _export_config_to_file(self, filepath: str) -> tuple:
         """config 변수를 config.py 정의 순서대로 내보냅니다."""
         return llm_novel_gui_func.export_config_to_file(filepath)
 
     def _restore_config_from_file(self, filepath: str) -> str:
         """지정된 파일에서 config 변수를 복구합니다."""
-        return llm_novel_gui_func.restore_config_from_file(filepath)
+        ok, message = llm_novel_gui_func.restore_config_from_file(filepath)
+        return message if ok else f"[실패] {message}"
 
     def _build_episode_full_track_table(self) -> str:
         """episode_full_track 상태를 테이블로 반환합니다."""
@@ -552,9 +553,14 @@ class LLMNovelGUI:
                     self._draw_status(stdscr, f"Generating... {updated_count}/{total_eps}")
                     stdscr.refresh()
         
-        final_result = story_gen.episode_summary_gen(callback=stream_callback)
+        try:
+            final_result = story_gen.episode_summary_gen(callback=stream_callback)
+        except Exception as e:
+            # 실패를 이전 내용으로 위장하지 않는다
+            self.content_text = f"에피소드 보완 생성 실패: {e}"
+            return
         self.episodes = self._split_episodes(final_result)
-        
+
         self.episode_mode = True
         self.current_episode_idx = 0
         self.scroll_offset = 0
@@ -916,8 +922,8 @@ class LLMNovelGUI:
                             
                             # config_export.yaml 저장 (1번 플롯 생성 후)
                             export_path = os.path.join("data", "config_export.yaml")
-                            self._export_config_to_file(export_path)
-                            llm_novel_gui_func.logger.info(f"config_export.yaml 저장 완료 (1번 플롯 생성 후): {export_path}")
+                            _exp_ok, _exp_msg = self._export_config_to_file(export_path)
+                            llm_novel_gui_func.logger.info(f"config_export.yaml 저장 {'완료' if _exp_ok else '실패'} (1번 플롯 생성 후): {_exp_msg}")
 
                             # theme_auto 모드이면 progress 저장
                             if use_theme_auto:
@@ -1124,15 +1130,21 @@ class LLMNovelGUI:
                                                 self._draw_status(stdscr, f"Generating... {updated_count}/{total_eps}")
                                                 stdscr.refresh()
                                     
-                                    final_result = story_gen.episode_summary_gen(callback=stream_callback)
-                                    self.episodes = self._split_episodes(final_result)
-                                    
-                                    if config.episode_content and config.episode_content[0]:
+                                    try:
+                                        final_result = story_gen.episode_summary_gen(callback=stream_callback)
+                                    except Exception as e:
+                                        # 실패를 이전 내용으로 위장하지 않는다
+                                        self.content_text = f"에피소드 보완 생성 실패: {e}"
+                                        final_result = ""
+                                    self.episodes = self._split_episodes(final_result) if final_result else []
+
+                                    if final_result and config.episode_content and config.episode_content[0]:
                                         self.content_text = f"## EPISODE 1 ##\n\n{config.episode_content[0]}"
                                     elif self.episodes:
                                         self.content_text = self.episodes[0]
-                                    else:
+                                    elif final_result:
                                         self.content_text = final_result
+                                    # final_result가 비면(실패) 위에서 설정한 오류 메시지 유지
                                 else:
                                     self.episodes = [ep for ep in config.episode_content if ep.strip()]
                                     self.content_text = f"## EPISODE 1 ##\n\n{config.episode_content[0]}"
@@ -1250,15 +1262,21 @@ class LLMNovelGUI:
                                                 self._draw_status(stdscr, f"Generating... {updated_count}/{total_eps}")
                                                 stdscr.refresh()
                                     
-                                    final_result = story_gen.episode_summary_gen(callback=stream_callback)
-                                    self.episodes = self._split_episodes(final_result)
-                                    
-                                    if config.episode_content and config.episode_content[0]:
+                                    try:
+                                        final_result = story_gen.episode_summary_gen(callback=stream_callback)
+                                    except Exception as e:
+                                        # 실패를 이전 내용으로 위장하지 않는다
+                                        self.content_text = f"에피소드 보완 생성 실패: {e}"
+                                        final_result = ""
+                                    self.episodes = self._split_episodes(final_result) if final_result else []
+
+                                    if final_result and config.episode_content and config.episode_content[0]:
                                         self.content_text = f"## EPISODE 1 ##\n\n{config.episode_content[0]}"
                                     elif self.episodes:
                                         self.content_text = self.episodes[0]
-                                    else:
+                                    elif final_result:
                                         self.content_text = final_result
+                                    # final_result가 비면(실패) 위에서 설정한 오류 메시지 유지
                                 else:
                                     self.episodes = [ep for ep in config.episode_content if ep.strip()]
                                     self.content_text = f"## EPISODE 1 ##\n\n{config.episode_content[0]}"
@@ -1551,8 +1569,8 @@ class LLMNovelGUI:
                         # 7번: 설정 내보내기 (Export Config)
                         try:
                             export_path = os.path.join("data", "config_export.yaml")
-                            result = self._export_config_to_file(export_path)
-                            self.content_text = result
+                            _exp_ok, _exp_msg = self._export_config_to_file(export_path)
+                            self.content_text = _exp_msg if _exp_ok else f"[실패] {_exp_msg}"
                         except Exception as e:
                             self.content_text = f"설정 내보내기 중 오류 발생:\n{e}"
                         self.content_selection = 0

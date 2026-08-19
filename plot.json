@@ -1,21 +1,30 @@
 {
-    "extended": "yes",
-    "ip_main": "gx10-a5a3",
-    "port_main": "8000",
+    "ip_main": "localhost",
+    "port_main": "8089",
+    "model_main": "Gemma 4 Flash Uncensored",
     "mainLLM": "gemma",
-    "ip_main_example": "gx10-a5a3",
-    "port_main_example": "8000",
-    "mainLLM_example": "gemma",
-    "agent": "gemma",
-    "agent_example": "localhost:8081",
+
+    "model_anima": "",
+    "anima_agent": "gemma",
+
+    "extended": "yes",
     "agent_2nd": "yes",
     "theme_agent": "yes",
-    "theme_auto":  "yes",
-    "anima_enb" : "no",
-    "anima_agent": "gemma",
+    "theme_auto": "yes",
+    "archtype_enb": "yes",
+
+    "anima_enb": "no",
     "anima_lora": 1,
     "anima_style": "lora_mix3",
-    "archtype_enb": "yes",
+    "noimage": "yes",
+
     "debug_menu": "yes",
-    "noimage": "yes"
+    "log_prompts": "no",
+
+    "ip_main_example": "localhost | 127.0.0.1 | 192.168.x.x",
+    "port_main_example": "vLLM/llama.cpp 서버 포트",
+    "model_main_example": "서버의 --served-model-name과 완전 일치해야 함 (다르면 404)",
+    "mainLLM_example": "gemma = repeat_penalty/top_k, qwen = enable_thinking + reasoning_effort",
+    "log_prompts_example": "no로 두면 로그에 프롬프트/응답 전문 대신 길이만 기록",
+    "api_key_note": "API 키는 이 파일에 두지 않습니다. .env 파일(OPENAI_API_KEY=...) 또는 환경변수로 설정하세요."
 }

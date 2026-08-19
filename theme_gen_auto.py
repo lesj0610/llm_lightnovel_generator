@@ -349,6 +349,21 @@ def theme_gen_auto_step1(story_info: str, num_episodes: int = 10, log_fn=None) -
         if log_fn:
             log_fn(msg)
 
+    # character.json 사용자 지정값을 먼저 반영한다 (이후 랜덤 로직이 덮어쓰지 않도록 잠금).
+    # 우선순위: 사용자 지정 > LLM 추론 > 랜덤
+    try:
+        import character_gen
+        spec_result = character_gen.apply_character_spec(log_fn=_log)
+        if spec_result["applied"]:
+            _log(f"[character] 적용됨: {sorted(spec_result['applied'])}")
+        if spec_result["failed"]:
+            _log("[character] " + character_gen.format_failure_report(spec_result["failed"]))
+    except FileNotFoundError:
+        pass  # character.json 없음 — 기존 랜덤 흐름 유지
+    except Exception as e:
+        # 캐릭터 설정 실패가 전체 생성을 막지는 않되, 조용히 넘어가지도 않는다
+        _log(f"[character] 설정 적용 실패({type(e).__name__}: {e}) — 랜덤 설정으로 진행")
+
     # inc_flag 확인 및 로깅
     if config.inc_flag == 1:
         _log("[inc_flag] 가족애 모드 활성화 (inc_flag=1)")
@@ -457,16 +472,28 @@ def theme_gen_auto_step1(story_info: str, num_episodes: int = 10, log_fn=None) -
                         continue
         return jobs
 
-    job_file = os.path.join(os.path.dirname(__file__), "theme_raw", "job.txt")
-    job2_file = os.path.join(os.path.dirname(__file__), "theme_raw", "job2.txt")
+    # theme_raw/가 없는 배포본이 많아 data/로 폴백한다 (없으면 FileNotFoundError로 죽었음)
+    def _job_path(fname):
+        raw = os.path.join(os.path.dirname(__file__), "theme_raw", fname)
+        if os.path.isfile(raw):
+            return raw
+        fallback = os.path.join(os.path.dirname(__file__), "data", fname)
+        _log(f"[job_file] theme_raw/{fname} 없음 -> data/{fname} 사용")
+        return fallback
+
+    job_file = _job_path("job.txt")
+    job2_file = _job_path("job2.txt")
 
     # inc_flag=1: 혈연관계 설정 (성별, 직업, 나이 모두 설정)
     if config.inc_flag == 1:
         character_setup.set_inc_relationship()
         _log(f"[inc_flag] rel1={config.rel1}, rel2={config.rel2}, sex={config.sex}, sex2={config.sex2}, job={config.job}, age={config.age}, job2={config.job2}, age2={config.age2}")
     else:
-        config.sex = "여자"
-        config.sex2 = "남자"
+        # 기본값은 여주인공 x 남상대. character.json에서 지정했으면 그 값을 유지한다.
+        if not config.is_locked("sex"):
+            config.sex = "여자"
+        if not config.is_locked("sex2"):
+            config.sex2 = "남자"
 
     def _filter_jobs_by_gender(jobs, gender):
         """성별에 맞는 직업 필터링"""
@@ -490,7 +517,11 @@ def theme_gen_auto_step1(story_info: str, num_episodes: int = 10, log_fn=None) -
 
     # 주인공 직업/나이 설정
     if config.inc_flag != 1:
-        if getattr(config, 'cmd_job', None) is None:
+        if config.is_locked("job"):
+            # character.json/LLM이 확정한 직업 — 나이만 비어 있으면 채운다
+            if not config.is_locked("age") and not getattr(config, "age", 0):
+                config.age = random.randint(20, 30)
+        elif getattr(config, 'cmd_job', None) is None:
             job_list = _parse_job_file(job_file)
             if job_list:
                 job_list_filtered = _filter_jobs_by_gender(job_list, config.sex)
@@ -512,7 +543,10 @@ def theme_gen_auto_step1(story_info: str, num_episodes: int = 10, log_fn=None) -
 
     # 상대방 직업/나이 설정
     if config.inc_flag != 1:
-        if getattr(config, 'cmd_job2', None) is None:
+        if config.is_locked("job2"):
+            if not config.is_locked("age2") and not getattr(config, "age2", 0):
+                config.age2 = random.randint(20, 40)
+        elif getattr(config, 'cmd_job2', None) is None:
             job2_list = _parse_job_file(job2_file)
             if job2_list:
                 job2_list_filtered = _filter_jobs_by_gender(job2_list, config.sex2)
@@ -536,36 +570,36 @@ def theme_gen_auto_step1(story_info: str, num_episodes: int = 10, log_fn=None) -
     character_setup.archetype_setup(config.get_json_value())
 
     # =====================================================================
-    # 3-1. 상대방 외모 설정
+    # 3-1. 상대방 외모 설정 (character.json/LLM이 확정했으면 통째로 건너뜀)
     # =====================================================================
-    config.appearance2 = ""
-    body_types = ["뚱뚱함", "보통", "마름"]
-    selected_body_type = random.choice(body_types)
-    config.appearance2 = selected_body_type
-
-    has_beard = random.choice(["수염있음", "수염없음"])
-    config.appearance2 += ", " + has_beard
-
-    hair_colors = ["검정", "갈색", "회색", "흰색", "금발", "밤색"]
-    if random.random() < 0.1:
-        selected_hair = "대머리"
+    if config.is_locked("appearance2"):
+        _log(f"[character] 상대방 외모 사용자/LLM 지정 유지: {config.appearance2[:60]}")
     else:
-        selected_hair = random.choice(hair_colors)
-    config.appearance2 += ", " + selected_hair
+        config.appearance2 = ""
+        body_types = ["뚱뚱함", "보통", "마름"]
+        selected_body_type = random.choice(body_types)
+        config.appearance2 = selected_body_type
 
-    look = random.choice(["추남", "평범", "잘생김"])
-    config.appearance2 += ", " + look
+        has_beard = random.choice(["수염있음", "수염없음"])
+        config.appearance2 += ", " + has_beard
 
-    talking_style2 = random.choice(["평범하게 말함", "천박하게 말함", "정중하게 말함", "껄렁하고 야한 농담을 즐기지만 필요할 땐 다정하게 말함"])
+        hair_colors = ["검정", "갈색", "회색", "흰색", "금발", "밤색"]
+        if random.random() < 0.1:
+            selected_hair = "대머리"
+        else:
+            selected_hair = random.choice(hair_colors)
+        config.appearance2 += ", " + selected_hair
 
-    # FIXME
-    talking_style2 = "껄렁하고 야한 농담을 즐기지만 필요할 땐 다정하게 말함"
-    config.talking_style2 = talking_style2
+        look = random.choice(["추남", "평범", "잘생김"])
+        config.appearance2 += ", " + look
 
-    personality2 = random.choice(["착함", "사악함(착한 척 함)", "사악함", "착함(사악한 척 함)"])
-    # FIXME
-    personality2 = "착하고 다정함"
-    config.personality2 = personality2
+    if not config.is_locked("talking_style2"):
+        # FIXME: 원래 랜덤 선택이었으나 현재 고정값 사용
+        config.talking_style2 = "껄렁하고 야한 농담을 즐기지만 필요할 땐 다정하게 말함"
+
+    if not config.is_locked("personality2"):
+        # FIXME: 원래 랜덤 선택이었으나 현재 고정값 사용
+        config.personality2 = "착하고 다정함"
 
     # 복장 (직업에 맞게) - theme/elements.yaml
     elements = _load_elements()

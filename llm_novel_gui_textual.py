@@ -453,7 +453,9 @@ class FourPaneApp(App):
         episode_full_track = []
         plot_hash = getattr(config, 'plot_hash', '')
         progress_dir = os.path.join(os.path.dirname(__file__), "progress")
-        result_dir = os.path.join(os.path.dirname(__file__), "result")
+        # run 단위 저장(result/<run_id>/) 도입에 따라 최신 run 디렉토리를 해석
+        result_dir = llm_novel_gui_func.resolve_latest_result_dir(
+            os.path.join(os.path.dirname(__file__), "result"))
 
         for i in range(config.total_episodes):
             ep_num = i + 1
@@ -749,7 +751,9 @@ class FourPaneApp(App):
                 num_episodes=config.total_episodes,
                 log_fn=gui_log
             )
-            llm_novel_gui_func.export_config_to_file(os.path.join("data", "config_export.yaml"))
+            _exp_ok, _exp_msg = llm_novel_gui_func.export_config_to_file(os.path.join("data", "config_export.yaml"))
+            if not _exp_ok:
+                raise RuntimeError(f"복구 상태 저장 실패: {_exp_msg}")
             llm_novel_gui_func.complete_theme_auto()
             prog_msg = self._generate_and_parse_progression()
 
@@ -838,8 +842,9 @@ class FourPaneApp(App):
     def _worker_export_config(self) -> None:
         try:
             filepath = os.path.join("data", "config_export.yaml")
-            result = llm_novel_gui_func.export_config_to_file(filepath)
-            self.call_from_thread(self._finish_worker, editor_text=f"{result}\n\n파일: {filepath}", status_msg="설정 내보내기 완료", readonly=True)
+            ok, message = llm_novel_gui_func.export_config_to_file(filepath)
+            status = "설정 내보내기 완료" if ok else "설정 내보내기 실패"
+            self.call_from_thread(self._finish_worker, editor_text=f"{message}\n\n파일: {filepath}", status_msg=status, readonly=True)
         except Exception as e:
             self.call_from_thread(self._finish_worker, editor_text=f"설정 내보내기 오류: {e}", status_msg="오류 발생")
 
@@ -847,8 +852,10 @@ class FourPaneApp(App):
     def _worker_restore_config(self) -> None:
         try:
             filepath = os.path.join("data", "config_export.yaml")
-            result = llm_novel_gui_func.restore_config_from_file(filepath)
-            self.call_from_thread(self._finish_worker, editor_text=f"{result}", status_msg="설정 복구 완료", readonly=True)
+            ok, message = llm_novel_gui_func.restore_config_from_file(filepath)
+            # 반환값을 검사해 실패를 "완료"로 표시하지 않는다
+            status = "설정 복구 완료" if ok else "설정 복구 실패"
+            self.call_from_thread(self._finish_worker, editor_text=f"{message}", status_msg=status, readonly=True)
         except Exception as e:
             self.call_from_thread(self._finish_worker, editor_text=f"설정 복구 오류: {e}", status_msg="오류 발생")
 

@@ -1,9 +1,17 @@
+.env
+character.json
+/characters
 *.bak
 *.pyc
 *.swp
+*.tmp
 /__pycache__
 /log
 /progress
 /venv
 /order
+/result
+/done
+/data/config_export.yaml
 *.md
+!README.md
