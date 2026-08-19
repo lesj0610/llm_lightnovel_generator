@@ -1,6 +1,12 @@
 #!/bin/bash
+cd "$(dirname "$0")"
 rm -f *.log
 rm -f log/*.*
+
+if [ -z "$OPENAI_API_KEY" ]; then
+    echo "오류: OPENAI_API_KEY 환경변수가 필요합니다. (서버 --api-key와 같은 값)"
+    exit 1
+fi
 
 # 인자 파싱
 JINSHUGAI_ID=""

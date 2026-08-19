@@ -6,4 +6,7 @@
 /progress
 /venv
 /order
+/result
+/done
 *.md
+!README.md
