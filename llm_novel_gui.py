@@ -64,8 +64,8 @@ class LLMNovelGUI:
         except Exception as e:
             self.content_text = f"테마 생성 중 오류 발생: {e}"
 
-        # ANIMA 활성화 여부 확인
-        self.anima_enb = bool(config.json_value.get("anima_enb", False))
+        # ANIMA 활성화 여부 확인 (bool("no")는 True라서 문자열 불리언은 flag_on으로 판정)
+        self.anima_enb = config.flag_on(config.json_value.get("anima_enb", "no"))
         
         self.menu_items: List[str] = [
             "1. 플롯 생성 (Generate Plot)",
@@ -402,7 +402,8 @@ class LLMNovelGUI:
 
     def _restore_config_from_file(self, filepath: str) -> str:
         """지정된 파일에서 config 변수를 복구합니다."""
-        return llm_novel_gui_func.restore_config_from_file(filepath)
+        ok, message = llm_novel_gui_func.restore_config_from_file(filepath)
+        return message if ok else f"[실패] {message}"
 
     def _build_episode_full_track_table(self) -> str:
         """episode_full_track 상태를 테이블로 반환합니다."""

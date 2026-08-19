@@ -847,8 +847,10 @@ class FourPaneApp(App):
     def _worker_restore_config(self) -> None:
         try:
             filepath = os.path.join("data", "config_export.yaml")
-            result = llm_novel_gui_func.restore_config_from_file(filepath)
-            self.call_from_thread(self._finish_worker, editor_text=f"{result}", status_msg="설정 복구 완료", readonly=True)
+            ok, message = llm_novel_gui_func.restore_config_from_file(filepath)
+            # 반환값을 검사해 실패를 "완료"로 표시하지 않는다
+            status = "설정 복구 완료" if ok else "설정 복구 실패"
+            self.call_from_thread(self._finish_worker, editor_text=f"{message}", status_msg=status, readonly=True)
         except Exception as e:
             self.call_from_thread(self._finish_worker, editor_text=f"설정 복구 오류: {e}", status_msg="오류 발생")
 

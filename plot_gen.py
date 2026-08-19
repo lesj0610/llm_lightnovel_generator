@@ -11,7 +11,8 @@ import story_gen
 import sys
 import time
 from openAPI_control import (
-    call_openai_for_plot
+    call_openai_for_plot,
+    LLMRequestError,
 )
 
 # =============================================================================
@@ -177,19 +178,21 @@ def _update_character_sheets_via_api(episode_text, ep_num,
         anal_sex_count=config.anal_sex_count, pose_sex_count=config.pose_sex_count,
         ep_num=ep_num, episode_text=episode_text, name1=name1, name2=name2
     )
-    result, _ = call_openai_for_plot(
-        prompt,
-        system_prompt=VARS["system_role"],
-        log_fn=log_fn,
-        temperature=api_settings["temperature"],
-        timeout=api_settings["timeout"],
-        repeat_penalty=api_settings["repeat_penalty"],
-        max_retries=api_settings["max_retries"],
-        retry_delay=api_settings["retry_delay"]
-    )
-    if result == "서버 응답 실패":
+    try:
+        result, _ = call_openai_for_plot(
+            prompt,
+            system_prompt=VARS["system_role"],
+            log_fn=log_fn,
+            temperature=api_settings["temperature"],
+            timeout=api_settings["timeout"],
+            repeat_penalty=api_settings["repeat_penalty"],
+            max_retries=api_settings["max_retries"],
+            retry_delay=api_settings["retry_delay"]
+        )
+    except LLMRequestError as e:
+        # 시트 업데이트는 부가 기능: 실패 시 기존 시트 유지하고 계속 진행
         if log_fn:
-            log_fn(f"[캐릭터 시트 업데이트] EPISODE {ep_num} - 서버 응답 실패. 기존 시트 유지")
+            log_fn(f"[캐릭터 시트 업데이트] EPISODE {ep_num} - 요청 실패({e}). 기존 시트 유지")
         return current_protagonist, current_partner
     import json as json_module
     try:
@@ -828,11 +831,21 @@ def plot_gen_extended(template_id, total_episodes=12, theme_msg=None,
 
     episodes = parse_episodes(refined_all_episodes, total_episodes)
 
-    if not episodes or len(episodes) < total_episodes:
-        retry_prompt = "\n출력 형식을 반드시 지켜주세요. EPISODE 1:, EPISODE 2: 형식으로 정확히 " + str(total_episodes) + "줄을 출력하세요."
-        if callback: callback("[추가] 재시도 중 (에피소드 부족)...")
+    # parse_episodes는 항상 total_episodes 길이로 패딩하므로 길이 비교는 무의미.
+    # 빈 슬롯 존재 여부로 부족을 판정해야 재시도가 실제로 동작한다.
+    missing = [i + 1 for i, ep in enumerate(episodes) if not ep.strip()]
+    if missing:
+        retry_prompt = ("\n출력 형식을 반드시 지켜주세요. EPISODE 1:, EPISODE 2: 형식으로 정확히 "
+                        + str(total_episodes) + "줄을 출력하세요. 특히 EPISODE "
+                        + ", ".join(str(n) for n in missing) + "가 누락되었습니다.")
+        if callback: callback(f"[추가] 재시도 중 (에피소드 {missing} 부족)...")
         result, plot_messages = call_openai_for_plot(retry_prompt, messages=plot_messages, log_fn=log)
-        episodes = parse_episodes(result, total_episodes)
+        retry_episodes = parse_episodes(result, total_episodes)
+        # 재시도 결과와 병합: 비어있지 않은 쪽 우선
+        episodes = [r if r.strip() else e for e, r in zip(episodes, retry_episodes)]
+        still_missing = [i + 1 for i, ep in enumerate(episodes) if not ep.strip()]
+        if still_missing:
+            log(f"[경고] 재시도 후에도 EPISODE {still_missing} 누락 — 부분 실패로 표시하고 진행")
 
     if callback: callback("[완료] 에피소드 후처리 중...")
     refined_episodes = review_and_refine(episodes, template, resistance_positions, total_episodes)
@@ -890,12 +903,9 @@ def review_and_refine(episodes, template, resistance_positions, total_episodes):
     for i, ep in enumerate(episodes):
         ep_num = i + 1
         if not ep.strip():
-            if ep_num == 1:
-                ep = f"{template['flow'].split(' -> ')[0]}로 시작하는 일상"
-            elif ep_num == total_episodes:
-                ep = f"{template['ending']}에 도달"
-            else:
-                ep = f"이성이 흐려지고 쾌락에 타락하는 과정 진행"
+            # 누락을 범용 문장으로 은폐하지 않는다 — 부분 실패를 명시적으로 표시
+            refined.append(f"##EPISODE {ep_num}: (생성 누락 — 이 에피소드는 재생성이 필요합니다)")
+            continue
         if ep_num in resistance_positions:
             if "저항" not in ep and "버티" not in ep and "거부" not in ep and "도망" not in ep:
                 ep = f"{ep} (마지막 남은 이성으로 필사적으로 타락에 저항하려 눈물을 흘리지만, 육체는 이미 엣찌하게 반응하고 마는 모순을 보임)"

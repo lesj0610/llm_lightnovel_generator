@@ -571,8 +571,9 @@ class FourPaneApp(App):
         """9번 메뉴: 설정 복구"""
         try:
             filepath = os.path.join("data", "config_export.yaml")
-            result = llm_novel_gui_func.restore_config_from_file(filepath)
-            self.call_from_thread(self._update_ui, editor_text=f"{result}", status_text="상태: 설정 복구 완료", readonly=True)
+            ok, message = llm_novel_gui_func.restore_config_from_file(filepath)
+            status = "상태: 설정 복구 완료" if ok else "상태: 설정 복구 실패"
+            self.call_from_thread(self._update_ui, editor_text=f"{message}", status_text=status, readonly=True)
         except Exception as e:
             self.call_from_thread(self._update_ui, editor_text=f"설정 복구 오류: {e}", status_text="상태: 오류")
         self.call_from_thread(self._focus_menu)
