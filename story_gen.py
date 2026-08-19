@@ -82,8 +82,9 @@ def theme_gen():
             character_setup.name_define()                
                     
             return f"테마 적용 완료: {config.plot}"
-    except Exception as e:
-        return f"theme_gen 오류 발생: {e}"
+    except Exception:
+        # 오류 문자열 반환은 호출자가 정상 결과로 오인하는 원인 — 예외 전파
+        raise
 
 def generate_plot():
     """플롯을 생성하여 반환합니다."""
@@ -239,7 +240,8 @@ def episode_gen(filename_override: str = None):
         print(f"[episode_gen] 오류 발생: {e}")
         import traceback
         traceback.print_exc()
-        return f"에피소드 생성 중 오류 발생: {e}"
+        # 오류 문자열 반환은 호출자가 정상 결과로 오인하는 원인 — 예외 전파
+        raise
 
 def generate_single_episode(ep_num: int, callback=None, structure_type: str = "") -> str:
     """단일 에피소드의 전체 소설 내용을 생성합니다.
@@ -305,8 +307,10 @@ def generate_single_episode(ep_num: int, callback=None, structure_type: str = ""
 
         return chapter
 
-    except Exception as e:
-        return f"에피소드 {ep_num} 생성 중 오류 발생: {e}"
+    except Exception:
+        # 오류 문자열이 에피소드 본문·track=True로 흡수되는 것을 방지 — 예외 전파
+        config.episode_full_track[ep_num - 1] = False
+        raise
 
 
 def _update_character_sheets_from_episode(episode_text: str, ep_num: int) -> None:
@@ -483,8 +487,9 @@ def episode_summary_gen(callback=None):
         log(f"\n[완료] 전체 {config.total_episodes}개 에피소드 생성 완료")
         return final_result
 
-    except Exception as e:
-        return f"에피소드 보완 생성 중 오류 발생: {e}\n(API 키 설정 등을 확인하세요)"
+    except Exception:
+        # 오류 문자열 반환은 호출자가 정상 결과로 오인하는 원인 — 예외 전파
+        raise
     finally:
         if log_file:
             log_file.close()
@@ -825,9 +830,10 @@ def episode_gen_extended(filename_override: str = None):
         config.result_text = "\n".join(result_lines)
         config.episode_gen_flag = True
         return config.result_text
-    
-    except Exception as e:
-        return f"에피소드 생성 중 오류 발생: {e}"
+
+    except Exception:
+        # 오류 문자열 반환은 호출자가 정상 결과로 오인하는 원인 — 예외 전파
+        raise
 
 
 def theme_file_sel(force_inc=None):

@@ -98,6 +98,19 @@ def _fix_special_writing_req_keys() -> None:
         logger.info("special_writing_req 키 int 변환: %s", fixed)
 
 
+def _apply_saved_config_vars(saved_vars: dict) -> int:
+    """저장 파일의 변수를 config에 적용하는 공통 필터 (모든 복구 경로 필수 경유).
+
+    json_value는 항상 제외: setattr하면 module __getattr__의 live 읽기가 죽고
+    stale 스냅샷(과거 키 포함 가능)이 살아남는다. 기존 shadow도 함께 제거.
+    """
+    saved_vars.pop("json_value", None)
+    config.__dict__.pop("json_value", None)
+    for key, val in saved_vars.items():
+        setattr(config, key, val)
+    return len(saved_vars)
+
+
 def load_config_state() -> None:
     """JSON 파일에서 config 변수를 복구합니다."""
     if not os.path.exists(SAVE_STATE_FILE):
@@ -107,8 +120,7 @@ def load_config_state() -> None:
         with open(SAVE_STATE_FILE, "r", encoding="utf-8") as f:
             content = f.read()
             saved_vars = json.loads(content)
-        for key, val in saved_vars.items():
-            setattr(config, key, val)
+        _apply_saved_config_vars(saved_vars)
         # JSON 직렬화 시 dict 키가 str로 바뀌므로 int로 복원
         _fix_special_writing_req_keys()
         logger.info("Config 복구 성공: %s (%d개 변수)", SAVE_STATE_FILE, len(saved_vars))
@@ -163,8 +175,7 @@ def load_config_export() -> str:
         if not exported_vars:
             logger.debug("config_export.yaml이 비어 있음")
             return ""
-        for key, val in exported_vars.items():
-            setattr(config, key, val)
+        _apply_saved_config_vars(exported_vars)  # json_value shadow 차단 공통 필터
         # YAML에도 int 키가 str로 저장될 수 있으므로 복원
         _fix_special_writing_req_keys()
         logger.info("config_export.yaml에서 %d개 변수 로드 완료", len(exported_vars))
@@ -584,13 +595,7 @@ def restore_config_from_file(filepath: str) -> tuple:
         with open(filepath, "r", encoding="utf-8") as f:
             # yaml.FullLoader 사용: !!python/tuple 등 Python 전용 태그도 파싱
             saved_vars = yaml.load(f, Loader=yaml.FullLoader)
-        # json_value 복구 금지: setattr하면 module __getattr__의 live 읽기가
-        # 죽고 stale 스냅샷이 살아남 (importlib.reload로도 안 지워짐).
-        # 과거 export 파일에 남아 있을 수 있으므로 로드 시에도 무시 + 기존 shadow 제거.
-        saved_vars.pop("json_value", None)
-        config.__dict__.pop("json_value", None)
-        for key, val in saved_vars.items():
-            setattr(config, key, val)
+        _apply_saved_config_vars(saved_vars)  # json_value shadow 차단 공통 필터
         # YAML/JSON 직렬화 시 dict 키가 str로 바뀔 수 있으므로 int로 복원
         _fix_special_writing_req_keys()
         logger.info("설정 복구 성공: %s (총 %d개 변수)", filepath, len(saved_vars))
@@ -1341,8 +1346,10 @@ def run_auto_sequence(
             config.result_text = "\n".join(result_lines)
             config.episode_gen_flag = not auto_missing
             if auto_missing:
-                _menu1_logger.warning(f"[10번] extended 에피소드 누락: {auto_missing}")
-            _menu1_logger.info(f"[10번] extended 에피소드 생성 완료 - {total_eps - len(auto_missing)}개")
+                # 요약 누락 상태로 스토리 생성을 진행하면 빈 에피소드가 연쇄됨 — 중단
+                _menu1_logger.warning(f"[10번] extended 에피소드 누락: {auto_missing} — 자동 실행 중단")
+                raise RuntimeError(f"에피소드 생성 누락: {auto_missing} — 자동 실행을 중단합니다")
+            _menu1_logger.info(f"[10번] extended 에피소드 생성 완료 - {total_eps}개")
         else:
             # 표준 모드
             _menu1_logger.info(
@@ -1371,6 +1378,14 @@ def run_auto_sequence(
                 content_preview = config.episode_content[i][:60] if config.episode_content[i] else "EMPTY"
                 _menu1_logger.info(f"[10번] episode_content[{i}]: {content_preview}...")
 
+            # 표준 모드도 누락 검증 (extended와 동일한 중단 계약)
+            std_missing = [i + 1 for i in range(config.total_episodes)
+                           if i >= len(config.episode_content)
+                           or not (config.episode_content[i] or "").strip()]
+            if std_missing or not config.episode_gen_flag:
+                _menu1_logger.warning(f"[10번] 표준 모드 에피소드 누락: {std_missing} — 자동 실행 중단")
+                raise RuntimeError(f"에피소드 생성 누락(표준 모드): {std_missing} — 자동 실행을 중단합니다")
+
         # 에피소드 내용과 캐릭터 시트를 progress 디렉토리에 저장
         plot_hash = getattr(config, 'plot_hash', '')
         if plot_hash:
@@ -1398,6 +1413,14 @@ def run_auto_sequence(
 
         final_result = full_episode_gen.full_episode_gen(ep_num=0, callback=stream_callback)
         _menu1_logger.info(f"[10번] full_episode_gen 완료 - episode_full_track={list(config.episode_full_track)}")
+
+        # 스토리 전 에피소드 완료 검증 — 미완료가 있으면 완료 선언·아카이브 금지
+        story_missing = [i + 1 for i in range(config.total_episodes)
+                         if not config.episode_full_track[i]]
+        if story_missing:
+            _menu1_logger.warning(f"[10번] 스토리 미완료 에피소드: {story_missing} — 자동 실행 중단")
+            raise RuntimeError(
+                f"스토리 미완료 에피소드: {story_missing} (생성 실패 또는 품질 기준 미달) — 자동 실행을 중단합니다")
         cb("story", "6번: 스토리 생성 완료", "[전체 자동 실행]\n\n1. 초기화 완료\n\n2. 1번: 플롯 생성 완료\n\n3. 4번: 에피소드 생성 완료\n\n4. 6번: 스토리 생성 완료")
 
         # =========================================================
@@ -1414,10 +1437,21 @@ def run_auto_sequence(
             )
 
             if not anima_result["success"]:
-                _menu1_logger.info(f"[10번] ANIMA 생성 오류: {anima_result['progress_log'][-1]}")
+                anima_error = (anima_result.get('progress_log') or ["원인 미상"])[-1]
+                _menu1_logger.warning(f"[10번] ANIMA 생성 실패: {anima_error} — 부분 완료로 종료 (아카이브 생략)")
+                content_text = (f"[전체 자동 실행 부분 완료 — ANIMA 실패]\n\n"
+                                f"1~4단계(플롯·에피소드·스토리)는 완료됐고 result/에 저장됐습니다.\n"
+                                f"5. ANIMA 생성 실패: {anima_error}\n\n"
+                                f"아카이브는 수행하지 않았습니다. ANIMA 재실행 후 아카이브하세요.")
+                cb("done", "부분 완료 (ANIMA 실패)", content_text)
+                return {
+                    "success": False,
+                    "content_text": content_text,
+                    "current_file_index": current_file_index,
+                }
 
         # =========================================================
-        # 완료
+        # 완료 (모든 단계 검증 통과 시에만 도달)
         # =========================================================
         _menu1_logger.info("[10번] 전체 자동 실행 완료!")
         content_text = f"[전체 자동 실행 완료]\n\n1. 초기화 완료\n\n2. 1번: 플롯 생성 완료\n\n3. 4번: 에피소드 생성 완료\n\n4. 6번: 스토리 생성 완료\n\n총 {config.total_episodes}개의 에피소드가 result/ 디렉토리에 저장되었습니다."

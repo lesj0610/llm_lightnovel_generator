@@ -553,9 +553,14 @@ class LLMNovelGUI:
                     self._draw_status(stdscr, f"Generating... {updated_count}/{total_eps}")
                     stdscr.refresh()
         
-        final_result = story_gen.episode_summary_gen(callback=stream_callback)
+        try:
+            final_result = story_gen.episode_summary_gen(callback=stream_callback)
+        except Exception as e:
+            # 실패를 이전 내용으로 위장하지 않는다
+            self.content_text = f"에피소드 보완 생성 실패: {e}"
+            return
         self.episodes = self._split_episodes(final_result)
-        
+
         self.episode_mode = True
         self.current_episode_idx = 0
         self.scroll_offset = 0
@@ -1125,15 +1130,21 @@ class LLMNovelGUI:
                                                 self._draw_status(stdscr, f"Generating... {updated_count}/{total_eps}")
                                                 stdscr.refresh()
                                     
-                                    final_result = story_gen.episode_summary_gen(callback=stream_callback)
-                                    self.episodes = self._split_episodes(final_result)
-                                    
-                                    if config.episode_content and config.episode_content[0]:
+                                    try:
+                                        final_result = story_gen.episode_summary_gen(callback=stream_callback)
+                                    except Exception as e:
+                                        # 실패를 이전 내용으로 위장하지 않는다
+                                        self.content_text = f"에피소드 보완 생성 실패: {e}"
+                                        final_result = ""
+                                    self.episodes = self._split_episodes(final_result) if final_result else []
+
+                                    if final_result and config.episode_content and config.episode_content[0]:
                                         self.content_text = f"## EPISODE 1 ##\n\n{config.episode_content[0]}"
                                     elif self.episodes:
                                         self.content_text = self.episodes[0]
-                                    else:
+                                    elif final_result:
                                         self.content_text = final_result
+                                    # final_result가 비면(실패) 위에서 설정한 오류 메시지 유지
                                 else:
                                     self.episodes = [ep for ep in config.episode_content if ep.strip()]
                                     self.content_text = f"## EPISODE 1 ##\n\n{config.episode_content[0]}"
@@ -1251,15 +1262,21 @@ class LLMNovelGUI:
                                                 self._draw_status(stdscr, f"Generating... {updated_count}/{total_eps}")
                                                 stdscr.refresh()
                                     
-                                    final_result = story_gen.episode_summary_gen(callback=stream_callback)
-                                    self.episodes = self._split_episodes(final_result)
-                                    
-                                    if config.episode_content and config.episode_content[0]:
+                                    try:
+                                        final_result = story_gen.episode_summary_gen(callback=stream_callback)
+                                    except Exception as e:
+                                        # 실패를 이전 내용으로 위장하지 않는다
+                                        self.content_text = f"에피소드 보완 생성 실패: {e}"
+                                        final_result = ""
+                                    self.episodes = self._split_episodes(final_result) if final_result else []
+
+                                    if final_result and config.episode_content and config.episode_content[0]:
                                         self.content_text = f"## EPISODE 1 ##\n\n{config.episode_content[0]}"
                                     elif self.episodes:
                                         self.content_text = self.episodes[0]
-                                    else:
+                                    elif final_result:
                                         self.content_text = final_result
+                                    # final_result가 비면(실패) 위에서 설정한 오류 메시지 유지
                                 else:
                                     self.episodes = [ep for ep in config.episode_content if ep.strip()]
                                     self.content_text = f"## EPISODE 1 ##\n\n{config.episode_content[0]}"

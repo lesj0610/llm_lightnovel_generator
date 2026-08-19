@@ -6,6 +6,7 @@ import re
 import time
 import json
 import traceback
+import uuid
 from common_def import get_particles
 from openAPI_control import call_openai_for_plot, LLMRequestError
 import quality_gate
@@ -41,7 +42,8 @@ def _generate_part_with_gate(sec_name, user_prompt, messages, log, current_ep):
 def _ensure_run_dir():
     """result/<run_id>/ 디렉토리를 보장하고 latest 포인터를 갱신합니다."""
     if not config.current_run_id:
-        config.current_run_id = time.strftime("%Y%m%d_%H%M%S")
+        # uuid 접미사: 같은 초에 시작된 실행이 같은 디렉토리를 쓰는 충돌 방지
+        config.current_run_id = time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
     run_dir = os.path.join("result", config.current_run_id)
     os.makedirs(run_dir, exist_ok=True)
     _atomic_write(os.path.join("result", "latest"), config.current_run_id)

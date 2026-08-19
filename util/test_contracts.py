@@ -106,6 +106,52 @@ class TestConfigContracts(unittest.TestCase):
         self.assertEqual(config.messages_history[0]["role"], "system")
 
 
+class TestConfigLoaders(unittest.TestCase):
+    """모든 복구 경로가 json_value shadow를 차단해야 한다."""
+
+    def test_load_config_export_filters_json_value(self):
+        applied = gf._apply_saved_config_vars(
+            {"json_value": {"ip_main": "stale-host"}, "love_value": 7})
+        self.assertEqual(applied, 1)
+        self.assertNotIn("json_value", vars(config))
+        self.assertNotEqual(config.json_value.get("ip_main"), "stale-host")
+        self.assertEqual(config.love_value, 7)
+
+    def test_filter_removes_existing_shadow(self):
+        config.__dict__["json_value"] = {"ip_main": "old-shadow"}
+        gf._apply_saved_config_vars({"love_value": 1})
+        self.assertNotIn("json_value", vars(config))
+
+
+class TestRunId(unittest.TestCase):
+    def test_run_ids_unique_within_same_second(self):
+        import full_episode_gen as feg
+        ids = set()
+        for _ in range(5):
+            config.current_run_id = ""
+            feg._ensure_run_dir()
+            ids.add(config.current_run_id)
+        self.assertEqual(len(ids), 5)
+        # 정리
+        import shutil
+        for rid in ids:
+            shutil.rmtree(os.path.join("result", rid), ignore_errors=True)
+        config.current_run_id = ""
+
+
+class TestGenerateRefineContract(unittest.TestCase):
+    def test_refine_failure_not_success(self):
+        """episode_summary_gen 실패가 성공(이전 내용 표시)으로 둔갑하면 안 된다."""
+        from unittest import mock
+        import story_gen
+        with mock.patch.object(story_gen, "episode_summary_gen",
+                               side_effect=RuntimeError("API 실패")):
+            result = gf.generate_refine()
+        self.assertFalse(result["success"])
+        self.assertIn("API 실패", result["out_txt"])
+        self.assertEqual(result["episode_count"], 0)
+
+
 class TestApiKey(unittest.TestCase):
     def test_env_priority_and_env_file(self):
         old = os.environ.pop("OPENAI_API_KEY", None)
