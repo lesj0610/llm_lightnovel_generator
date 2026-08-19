@@ -474,6 +474,106 @@ class TestCharacterGen(unittest.TestCase):
         self.assertEqual(result["failed"], [])
 
 
+class TestCharacterPool(unittest.TestCase):
+    """캐릭터 풀: 역할별 저장, 조합, 활성 지정."""
+
+    def setUp(self):
+        import shutil
+        import tempfile
+        import character_pool
+        self.cp = character_pool
+        self._tmp = tempfile.mkdtemp()
+        self._old_dir, self._old_active = character_pool.POOL_DIR, character_pool.ACTIVE_FILE
+        character_pool.POOL_DIR = os.path.join(self._tmp, "characters")
+        character_pool.ACTIVE_FILE = os.path.join(self._tmp, "character.json")
+
+        def _restore():
+            character_pool.POOL_DIR = self._old_dir
+            character_pool.ACTIVE_FILE = self._old_active
+            shutil.rmtree(self._tmp, ignore_errors=True)
+        self.addCleanup(_restore)
+
+    def _make(self):
+        pro, _ = self.cp.save(
+            {"name": "주인공A", "sex": "여자", "age": 22, "job": "아이돌"},
+            self.cp.ROLE_PROTAGONIST,
+            resolved={"hair_color": "brown hair", "personality_real": "쿨데레",
+                      "appearance_note": "왼쪽 뺨의 점"})
+        par, _ = self.cp.save(
+            {"name": "상대B", "sex": "남자", "age": 35, "job": "회사원"},
+            self.cp.ROLE_PARTNER,
+            resolved={"personality_note": "겉은 무뚝뚝하나 속은 다정"})
+        return pro, par
+
+    def test_ids_increment_and_role_filter(self):
+        pro, par = self._make()
+        self.assertNotEqual(pro, par)
+        self.assertEqual([i["id"] for i in self.cp.list_characters(self.cp.ROLE_PROTAGONIST)],
+                         [pro])
+        self.assertEqual([i["id"] for i in self.cp.list_characters(self.cp.ROLE_PARTNER)],
+                         [par])
+
+    def test_resolved_is_filtered_by_role(self):
+        """주인공 태그가 상대방 항목에 섞이면 안 된다 (반대도)."""
+        pro, _ = self.cp.save({"name": "x"}, self.cp.ROLE_PROTAGONIST,
+                              resolved={"hair_color": "brown hair",
+                                        "appearance_note2": "섞이면안됨"})
+        par, _ = self.cp.save({"name": "y"}, self.cp.ROLE_PARTNER,
+                              resolved={"personality_note": "ok",
+                                        "hair_color": "섞이면안됨"})
+        self.assertNotIn("appearance_note2", self.cp.load(pro)["resolved"])
+        self.assertNotIn("hair_color", self.cp.load(par)["resolved"])
+
+    def test_active_combines_both_roles(self):
+        pro, par = self._make()
+        _, data = self.cp.set_active(protagonist_id=pro, partner_id=par)
+        self.assertEqual(data["protagonist"]["name"], "주인공A")
+        self.assertEqual(data["partner"]["name"], "상대B")
+        self.assertEqual(data["resolved"]["hair_color"], "brown hair")
+        # 상대방 서술은 partner 속성명으로 옮겨져야 한다
+        self.assertEqual(data["resolved"]["personality_note2"],
+                         "겉은 무뚝뚝하나 속은 다정")
+        self.assertEqual(self.cp.get_active_ids(), (pro, par))
+
+    def test_replacing_one_role_keeps_the_other(self):
+        pro, par = self._make()
+        self.cp.set_active(protagonist_id=pro, partner_id=par)
+        pro2, _ = self.cp.save({"name": "주인공C", "sex": "여자"},
+                               self.cp.ROLE_PROTAGONIST)
+        _, data = self.cp.set_active(protagonist_id=pro2)
+        self.assertEqual(data["partner"]["name"], "상대B", "상대방이 유지되지 않음")
+        self.assertEqual(data["protagonist"]["name"], "주인공C")
+        self.assertNotIn("hair_color", data["resolved"],
+                         "교체 전 주인공의 태그가 남아 있음")
+
+    def test_role_mismatch_rejected(self):
+        _pro, par = self._make()
+        with self.assertRaises(ValueError):
+            self.cp.set_active(protagonist_id=par)
+
+    def test_generator_consumes_resolved_without_llm(self):
+        """편집기에서 확정한 값은 생성기가 LLM 없이 그대로 쓴다."""
+        from unittest import mock
+        import character_gen
+        pro, par = self._make()
+        _, active_path = self.cp.set_active(protagonist_id=pro, partner_id=par), None
+        config.locked_fields.clear()
+        config.character_spec_applied = False
+        with mock.patch.object(character_gen, "_request_mapping",
+                               return_value=(None, "LLM 미사용")) as mocked:
+            result = character_gen.apply_character_spec(path=self.cp.ACTIVE_FILE)
+        self.assertEqual(config.hair_color, "brown hair")
+        self.assertEqual(config.personality_real, "쿨데레")
+        self.assertEqual(config.personality_note2, "겉은 무뚝뚝하나 속은 다정")
+        self.assertIn("hair_color", result["user_specified"])
+        # 확정된 항목은 실패 목록에 없어야 한다
+        failed_fields = {f["field"] for f in result["failed"]}
+        self.assertNotIn("hair_color", failed_fields)
+        self.assertNotIn("personality_real", failed_fields)
+        config.locked_fields.clear()
+        config.character_spec_applied = False
+
+
 class TestApiKey(unittest.TestCase):
     def test_env_priority_and_env_file(self):
         old = os.environ.pop("OPENAI_API_KEY", None)

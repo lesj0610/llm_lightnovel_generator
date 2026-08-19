@@ -125,14 +125,17 @@ def _clean(value):
 
 
 def load_character_spec(path=None):
-    """character.json을 읽어 (protagonist, partner, policy, exists)를 반환.
+    """character.json을 읽어 (protagonist, partner, policy, exists, resolved)를 반환.
+
+    resolved: 편집기(character_editor)가 미리 확정해 둔 태그·서술.
+    이 값이 있으면 해당 항목은 LLM을 다시 부르지 않는다.
 
     파일이 없으면 exists=False — 호출자는 LLM을 부르지 않고
     기존 랜덤 흐름을 그대로 유지한다.
     """
     path = path or CHARACTER_FILE
     if not os.path.isfile(path):
-        return {}, {}, "llm_auto", False
+        return {}, {}, "llm_auto", False, {}
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -144,7 +147,9 @@ def load_character_spec(path=None):
         return {k: _clean(v) for k, v in raw.items() if not k.startswith("_")}
 
     policy = _clean(data.get("on_mapping_failure")) or "llm_auto"
-    return _section("protagonist"), _section("partner"), policy, True
+    resolved = {k: v for k, v in (data.get("resolved") or {}).items()
+                if not k.startswith("_")}
+    return _section("protagonist"), _section("partner"), policy, True, resolved
 
 
 # =====================================================================
@@ -399,7 +404,7 @@ def apply_character_spec(path=None, log_fn=None, policy_override=None, force=Fal
         return {"applied": {}, "user_specified": [], "failed": [],
                 "policy": "", "needs_user_choice": False, "skipped": True}
 
-    protagonist, partner, policy, exists = load_character_spec(path)
+    protagonist, partner, policy, exists, resolved = load_character_spec(path)
     config.character_spec_applied = True
     if not exists:
         # character.json이 없으면 기존 랜덤 흐름을 그대로 둔다 (LLM 호출 없음)
@@ -411,6 +416,14 @@ def apply_character_spec(path=None, log_fn=None, policy_override=None, force=Fal
     candidates = load_candidates()
 
     applied, user_specified = {}, []
+
+    # 0) 편집기에서 이미 확정한 값 반영 — 해당 항목은 LLM을 다시 부르지 않는다
+    for attr, value in resolved.items():
+        _apply_value(attr, value)
+        applied[attr] = value
+        user_specified.append(attr)
+    if resolved:
+        log(f"편집기 확정값 {len(resolved)}개 반영: {sorted(resolved)}")
 
     # 1) 사용자 지정값 먼저 반영 (가장 높은 우선순위)
     for section, spec in (("protagonist", protagonist), ("partner", partner)):

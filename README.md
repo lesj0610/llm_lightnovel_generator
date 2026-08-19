@@ -45,6 +45,21 @@ pip install -r requirements.txt
 
 생성 결과는 result/실행시각/ 디렉토리에 저장되고, result/latest 파일이 가장 최근 실행을 가리킵니다.
 
+## 캐릭터 설정
+
+캐릭터를 직접 지정하려면 캐릭터 편집기를 쓰세요.
+
+python3 character_editor.py
+
+- 주인공과 상대방을 각각 만들어 characters/ 풀에 ID로 쌓아둡니다.
+- 이름/성별/나이/직업은 직접 입력하고, 외모·성격은 한국어·영어·일본어 아무 언어로나
+  자유롭게 서술하면 됩니다. LLM이 의미를 보존해 한국어로 정리하고 태그를 분류합니다.
+- 비워둔 항목은 지정한 값들을 근거로 LLM이 채웁니다. (F5)
+  LLM 서버 없이 작업하려면 F6으로 랜덤하게 채울 수 있습니다.
+- 풀에서 주인공 1명(F7) + 상대방 1명(F8)을 지정하면 character.json이 만들어지고,
+  소설 생성기가 그 조합으로 집필합니다.
+- character.json이 없으면 예전처럼 전부 랜덤으로 생성됩니다.
+
 <img width="2830" height="1394" alt="image" src="https://github.com/user-attachments/assets/cf872b48-42b4-4401-b888-31b67e2e167c" />
 
 
