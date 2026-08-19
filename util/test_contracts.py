@@ -152,9 +152,11 @@ class TestRunId(unittest.TestCase):
 
 
 class TestArchiveAndExportContracts(unittest.TestCase):
-    def test_archive_returns_tuple_and_succeeds_on_empty(self):
-        """archive_to_done는 (ok, msg) 계약 — png_count 미정의로 항상 실패하던 버그 회귀 방지."""
+    def test_archive_copies_md_without_network(self):
+        """(ok, msg) 계약 + md 실복사 검증. ARCHIVE_PNG=False에서는 ComfyUI
+        큐 폴링(urlopen)도 실행되면 안 된다 — urlopen 호출 시 즉시 실패."""
         import tempfile
+        import urllib.request
         from unittest import mock
         old_cwd = os.getcwd()
         with tempfile.TemporaryDirectory() as tmp:
@@ -163,11 +165,14 @@ class TestArchiveAndExportContracts(unittest.TestCase):
                 os.makedirs("result", exist_ok=True)
                 with open(os.path.join("result", "episode_01.md"), "w", encoding="utf-8") as f:
                     f.write("# Episode 1\n\n내용")
-                # ComfyUI 큐 대기 sleep은 테스트에서 무력화 (실서비스 로직 무변경)
-                with mock.patch.object(gf.time, "sleep"):
+                with mock.patch.object(urllib.request, "urlopen",
+                                       side_effect=AssertionError("네트워크 접근 금지")), \
+                     mock.patch.object(gf.time, "sleep",
+                                       side_effect=AssertionError("대기 금지")):
                     ok, msg = gf.archive_to_done(comfyui_dir=os.path.join(tmp, "없는경로"))
                 self.assertTrue(ok, msg)
                 self.assertIn("아카이브 완료", msg)
+                self.assertTrue(os.path.isfile(os.path.join("done", "book1", "episode_01.md")))
             finally:
                 os.chdir(old_cwd)
 
@@ -175,6 +180,48 @@ class TestArchiveAndExportContracts(unittest.TestCase):
         ok, msg = gf.export_config_to_file("/없는디렉토리/x/y.yaml")
         self.assertFalse(ok)
         self.assertIn("실패", msg)
+
+    def test_export_atomic_keeps_previous_on_failure(self):
+        """직렬화 실패 시 기존 복구 파일이 보존돼야 한다 (선삭제 후 쓰기 금지)."""
+        import tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "config_export.yaml")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("love_value: 1\n")
+            with mock.patch.object(gf.yaml, "dump", side_effect=RuntimeError("직렬화 실패")):
+                ok, msg = gf.export_config_to_file(path)
+            self.assertFalse(ok)
+            with open(path, encoding="utf-8") as f:
+                self.assertIn("love_value: 1", f.read())
+
+
+class TestFinalizeAutoRun(unittest.TestCase):
+    """자동 실행 마무리 계약: 완료 선언은 아카이브 성공 시에만."""
+
+    def _run(self, archive_result):
+        from unittest import mock
+        cb_calls = []
+        with mock.patch.object(gf, "archive_to_done", return_value=archive_result):
+            result = gf._finalize_auto_run(
+                cb=lambda step, status, text: cb_calls.append((step, status, text)),
+                anima_enb=False, current_file_index=0)
+        return result, cb_calls
+
+    def test_archive_failure_is_partial_without_complete_claim(self):
+        result, cb_calls = self._run((False, "아카이브 실패: 디스크 오류"))
+        self.assertFalse(result["success"])
+        self.assertTrue(result["content_text"].startswith("[전체 자동 실행 부분 완료"))
+        self.assertNotIn("[전체 자동 실행 완료]", result["content_text"])
+        statuses = [s for _, s, _ in cb_calls]
+        self.assertIn("부분 완료 (아카이브 실패)", statuses)
+        self.assertNotIn("전체 자동 실행 완료", statuses)
+
+    def test_archive_success_declares_complete(self):
+        result, cb_calls = self._run((True, "아카이브 완료: done/book1"))
+        self.assertTrue(result["success"])
+        self.assertIn("[전체 자동 실행 완료]", result["content_text"])
+        self.assertIn("전체 자동 실행 완료", [s for _, s, _ in cb_calls])
 
 
 class TestGenerateRefineContract(unittest.TestCase):

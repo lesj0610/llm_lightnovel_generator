@@ -574,12 +574,13 @@ def export_config_to_file(filepath: str) -> tuple:
             val = getattr(config, var, None)
             if val is not None:
                 vars_dict[var] = val
-        # 기존 파일 삭제 후 새로 생성
-        if os.path.exists(filepath):
-            os.remove(filepath)
-        with open(filepath, "w", encoding="utf-8") as f:
+        # 임시 파일에 완전히 쓴 뒤 원자적으로 교체 —
+        # 기존 파일을 먼저 삭제하면 직렬화/쓰기 실패 시 마지막 정상 복구 파일도 소실됨
+        tmp_path = filepath + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
             yaml.dump(vars_dict, f, allow_unicode=True, default_flow_style=False,
                       sort_keys=False, width=120)
+        os.replace(tmp_path, filepath)
         logger.info("설정 내보내기 성공: %s (%d개 변수)", filepath, len(vars_dict))
         return True, f"설정 내보내기 성공: {filepath}"
     except Exception as e:
@@ -618,8 +619,14 @@ def restore_config_from_file(filepath: str) -> tuple:
         return False, f"설정 복구 실패: {e}"
 
 
-def archive_to_done(result_dir: str = "result", comfyui_dir: str = None, done_dir: str = "done") -> str:
-    """전체 자동 실행 완료 후 result/의 markdown과 ComfyUI output의 png를 done/book{N}/로 아카이브.
+# PNG 아카이브 활성 스위치. 현재 noimage 워크플로라 비활성 —
+# True로 바꾸면 ComfyUI 큐 대기와 PNG 복사가 함께 동작한다.
+ARCHIVE_PNG = False
+
+
+def archive_to_done(result_dir: str = "result", comfyui_dir: str = None, done_dir: str = "done") -> tuple:
+    """전체 자동 실행 완료 후 result/의 markdown을 done/book{N}/로 아카이브.
+    (ARCHIVE_PNG=True이면 ComfyUI output의 png도 함께 아카이브)
 
     Args:
         result_dir: 마크다운 파일이 있는 디렉토리 (기본 "result")
@@ -627,7 +634,7 @@ def archive_to_done(result_dir: str = "result", comfyui_dir: str = None, done_di
         done_dir: 아카이브 대상 디렉토리 (기본 "done")
 
     Returns:
-        결과 메시지 문자열
+        (success: bool, message: str)
     """
     if comfyui_dir is None:
         comfyui_dir = os.path.join(os.path.expanduser("~"), "AI", "ComfyUI", "output")
@@ -665,49 +672,90 @@ def archive_to_done(result_dir: str = "result", comfyui_dir: str = None, done_di
                     md_count += 1
                     logger.info("아카이브: %s -> %s", src, dst)
 
-        # 3. ComfyUI 큐가 비어질 때까지 HTTP API 폴링으로 대기
-        logger.info("ComfyUI 큐 대기 시작...")
-        try:
-            import time
-            import json
-            import urllib.request
-
-            # HTTP API로 큐 상태를 30초마다 확인 (최대 30회 = 15분)
-            for poll in range(30):
-                try:
-                    with urllib.request.urlopen("http://127.0.0.1:8188/queue", timeout=5) as resp:
-                        queue_data = json.loads(resp.read())
-                    running = len(queue_data.get("queue_running", []))
-                    pending = len(queue_data.get("queue_pending", []))
-                    remaining = running + pending
-                    if remaining == 0:
-                        logger.info("ComfyUI 큐 비었음 - 60초 대기 후 파일 복사")
-                        time.sleep(60)
-                        break
-                    logger.info(f"ComfyUI 큐: running={running}, pending={pending} (남은 {remaining}개, {poll+1}/30회)")
-                except Exception as e:
-                    logger.info(f"ComfyUI 큐 확인 실패: {e}")
-                time.sleep(30)
-        except Exception as e:
-            logger.info(f"ComfyUI 큐 대기 실패: {e} - 즉시 파일 복사")
-
-        ## 4. ComfyUI output의 .png 파일 복사 (하위 디렉토리 포함) — 현재 비활성
+        # 3~4. PNG 아카이브 (ARCHIVE_PNG=True일 때만: 큐 대기 + PNG 복사)
+        # PNG를 복사하지 않으면서 큐만 최대 15분 기다리던 낭비 제거
         png_count = 0
-        #if os.path.exists(comfyui_dir):
-        #    for root, dirs, files in os.walk(comfyui_dir):
-        #        for fname in files:
-        #            if fname.lower().endswith(".png"):
-        #                src = os.path.join(root, fname)
-        #                dst = os.path.join(dest_dir, fname)
-        #                import shutil
-        #                shutil.copy2(src, dst)
-        #                png_count += 1
+        if ARCHIVE_PNG:
+            logger.info("ComfyUI 큐 대기 시작...")
+            try:
+                import time
+                import json
+                import urllib.request
 
-        logger.info("아카이브 완료: %s (md=%d, png=%d)", dest_dir, md_count, png_count)
-        return True, f"아카이브 완료: {dest_dir} (markdown={md_count}개, png={png_count}개)"
+                # HTTP API로 큐 상태를 30초마다 확인 (최대 30회 = 15분)
+                for poll in range(30):
+                    try:
+                        with urllib.request.urlopen("http://127.0.0.1:8188/queue", timeout=5) as resp:
+                            queue_data = json.loads(resp.read())
+                        running = len(queue_data.get("queue_running", []))
+                        pending = len(queue_data.get("queue_pending", []))
+                        remaining = running + pending
+                        if remaining == 0:
+                            logger.info("ComfyUI 큐 비었음 - 60초 대기 후 파일 복사")
+                            time.sleep(60)
+                            break
+                        logger.info(f"ComfyUI 큐: running={running}, pending={pending} (남은 {remaining}개, {poll+1}/30회)")
+                    except Exception as e:
+                        logger.info(f"ComfyUI 큐 확인 실패: {e}")
+                    time.sleep(30)
+            except Exception as e:
+                logger.info(f"ComfyUI 큐 대기 실패: {e} - 즉시 파일 복사")
+
+            if os.path.exists(comfyui_dir):
+                for root, dirs, files in os.walk(comfyui_dir):
+                    for fname in files:
+                        if fname.lower().endswith(".png"):
+                            src = os.path.join(root, fname)
+                            dst = os.path.join(dest_dir, fname)
+                            import shutil
+                            shutil.copy2(src, dst)
+                            png_count += 1
+
+        png_note = f", png={png_count}개" if ARCHIVE_PNG else " (PNG 아카이브 비활성)"
+        logger.info("아카이브 완료: %s (md=%d%s)", dest_dir, md_count, png_note)
+        return True, f"아카이브 완료: {dest_dir} (markdown={md_count}개{png_note})"
     except Exception as e:
         logger.error("아카이브 실패: %s", e)
         return False, f"아카이브 실패: {e}"
+
+
+def _finalize_auto_run(cb, anima_enb, current_file_index):
+    """자동 실행 마지막 단계: 아카이브 수행 후 결과에 맞는 본문을 처음부터 구성.
+
+    완료 선언([전체 자동 실행 완료] 헤더, 완료 로그, 완료 콜백)은 아카이브까지
+    성공했을 때만 만든다 — 실패 본문에 완료 문구가 섞이는 모순 방지.
+    """
+    base_steps = ("1. 초기화 완료\n\n2. 1번: 플롯 생성 완료\n\n"
+                  "3. 4번: 에피소드 생성 완료\n\n4. 6번: 스토리 생성 완료")
+    if anima_enb:
+        base_steps += "\n\n5. ANIMA 이미지 생성 완료"
+
+    _menu1_logger.info("[10번] 아카이브 시작...")
+    archive_ok, archive_msg = archive_to_done()
+    _menu1_logger.info(archive_msg)
+
+    if not archive_ok:
+        _menu1_logger.warning(f"[10번] 아카이브 실패 — 부분 완료로 종료: {archive_msg}")
+        content_text = (f"[전체 자동 실행 부분 완료 — 아카이브 실패]\n\n{base_steps}\n\n"
+                        f"6. 아카이브 실패: {archive_msg}\n"
+                        f"(생성 결과는 result/에 남아 있습니다)")
+        cb("done", "부분 완료 (아카이브 실패)", content_text)
+        return {
+            "success": False,
+            "content_text": content_text,
+            "current_file_index": current_file_index,
+        }
+
+    _menu1_logger.info("[10번] 전체 자동 실행 완료!")
+    content_text = (f"[전체 자동 실행 완료]\n\n{base_steps}\n\n"
+                    f"총 {config.total_episodes}개의 에피소드가 result/ 디렉토리에 저장되었습니다.\n\n"
+                    f"6. {archive_msg}")
+    cb("done", "전체 자동 실행 완료", content_text)
+    return {
+        "success": True,
+        "content_text": content_text,
+        "current_file_index": current_file_index,
+    }
 
 
 # -------------------------------------------------------------------------
@@ -1462,35 +1510,9 @@ def run_auto_sequence(
                 }
 
         # =========================================================
-        # 완료 (모든 단계 검증 통과 시에만 도달)
+        # 마무리: 아카이브 → 성공 시에만 전체 완료 선언
         # =========================================================
-        _menu1_logger.info("[10번] 전체 자동 실행 완료!")
-        content_text = f"[전체 자동 실행 완료]\n\n1. 초기화 완료\n\n2. 1번: 플롯 생성 완료\n\n3. 4번: 에피소드 생성 완료\n\n4. 6번: 스토리 생성 완료\n\n총 {config.total_episodes}개의 에피소드가 result/ 디렉토리에 저장되었습니다."
-        if anima_enb:
-            content_text += "\n\n5. ANIMA 이미지 생성 완료"
-
-        # 아카이브: result/의 markdown과 ComfyUI output의 png를 done/book{N}/로 이동
-        _menu1_logger.info("[10번] 아카이브 시작...")
-        archive_ok, archive_msg = archive_to_done()
-        _menu1_logger.info(archive_msg)
-        if not archive_ok:
-            # 소설 생성은 완료됐으나 아카이브 실패 — 완료로 위장하지 않는다
-            _menu1_logger.warning(f"[10번] 아카이브 실패 — 부분 완료로 종료: {archive_msg}")
-            content_text += f"\n\n6. 아카이브 실패: {archive_msg}\n(생성 결과는 result/에 남아 있습니다)"
-            cb("done", "부분 완료 (아카이브 실패)", content_text)
-            return {
-                "success": False,
-                "content_text": content_text,
-                "current_file_index": current_file_index,
-            }
-        content_text += f"\n\n6. {archive_msg}"
-        cb("done", "전체 자동 실행 완료", content_text)
-
-        return {
-            "success": True,
-            "content_text": content_text,
-            "current_file_index": current_file_index,
-        }
+        return _finalize_auto_run(cb, anima_enb, current_file_index)
 
     except Exception as e:
         import traceback
