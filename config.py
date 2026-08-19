@@ -92,6 +92,23 @@ appearance2 = "평범한 일상복"
 personality2 = "착함"
 talking_style2 = "평범하게 말함"
 
+# 사용자/LLM이 확정한 필드 이름 집합.
+# archetype_setup 등 후속 랜덤 로직이 이 필드들을 덮어쓰지 않도록 잠근다.
+locked_fields = set()
+
+
+def lock_field(name):
+    """해당 필드를 후속 랜덤 오버라이드로부터 보호."""
+    locked_fields.add(name)
+
+
+def is_locked(name) -> bool:
+    return name in locked_fields
+
+# 태그로 표현되지 않는 외모 디테일 (LLM이 자유 서술에서 추출, 소설 프롬프트에 전달)
+appearance_note = ""    # 주인공
+appearance_note2 = ""   # 상대방
+
 # Appearance (Character A)
 hair_color = ""
 hair_style = ""

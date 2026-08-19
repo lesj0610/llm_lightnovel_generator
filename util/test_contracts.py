@@ -5,6 +5,7 @@
 (저장소 루트에서 실행해야 plot.json 등 상대 경로가 맞습니다)
 """
 
+import json
 import os
 import sys
 import unittest
@@ -14,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 import quality_gate
 import plot_gen
+import character_setup
 import llm_novel_gui_func as gf
 import openAPI_control as oc
 
@@ -273,6 +275,137 @@ class TestGenerateRefineContract(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertIn("API 실패", result["out_txt"])
         self.assertEqual(result["episode_count"], 0)
+
+
+class TestCharacterGen(unittest.TestCase):
+    """캐릭터 설정: 사용자 지정 > LLM 추론 > 랜덤 우선순위와 검증 계약."""
+
+    def setUp(self):
+        import character_gen
+        self.cg = character_gen
+        self.candidates = character_gen.load_candidates()
+        config.locked_fields.clear()
+        self.addCleanup(config.locked_fields.clear)
+
+    def test_personality_names_have_no_hash(self):
+        """'###순수/평범'처럼 샵이 3개인 항목도 이름만 추출돼야 personality.txt 조회가 된다."""
+        names = self.candidates["personality_real"]
+        self.assertTrue(names)
+        self.assertFalse([n for n in names if n.startswith("#")])
+        self.assertIn("야마토 나데시코", names)
+
+    def test_index_field_returns_int_tag_field_returns_str(self):
+        # body_dic 인덱스로 소비되는 필드는 정수
+        ok, v, _ = self.cg.validate_choice("body_size", 3, self.candidates)
+        self.assertTrue(ok)
+        self.assertIsInstance(v, int)
+        # 태그 문자열로 소비되는 필드는 문자열
+        ok, v, _ = self.cg.validate_choice("eye_color", 0, self.candidates)
+        self.assertTrue(ok)
+        self.assertIsInstance(v, str)
+        self.assertIn(v, self.candidates["eye_color"])
+
+    def test_face_style_is_string_not_index(self):
+        """face_style은 character_init이 눈썹 태그를 이어붙이므로 문자열이어야 한다
+        (정수로 저장하면 'int += str' TypeError)."""
+        ok, v, _ = self.cg.validate_choice("face_style", 3, self.candidates)
+        self.assertTrue(ok)
+        self.assertIsInstance(v, str)
+        self.assertIn(v, self.candidates["face_style"])
+
+    def test_out_of_range_and_unknown_value_rejected(self):
+        ok, _, reason = self.cg.validate_choice("eye_color", 9999, self.candidates)
+        self.assertFalse(ok)
+        self.assertIn("범위", reason)
+        ok, _, reason = self.cg.validate_choice("eye_color", "무지개색 눈", self.candidates)
+        self.assertFalse(ok)
+        self.assertIn("후보에 없는", reason)
+
+    def test_empty_free_text_rejected_except_note(self):
+        ok, _, reason = self.cg.validate_choice("job2", "", self.candidates)
+        self.assertFalse(ok, "빈 자유 서술은 성공으로 치면 안 됨")
+        self.assertIn("빈 값", reason)
+        ok, v, _ = self.cg.validate_choice("appearance_note", "", self.candidates)
+        self.assertTrue(ok, "특이사항은 비어 있을 수 있음")
+
+    def test_user_spec_wins_and_locks(self):
+        """사용자 지정값은 LLM 호출 없이 반영되고 이후 랜덤에 덮이지 않는다."""
+        import tempfile
+        from unittest import mock
+        spec = {"protagonist": {"sex": "남자", "age": 31, "job": "형사",
+                                "appearance": "", "personality": ""},
+                "partner": {"sex": "여자", "age": 28, "job": "검사",
+                            "appearance": "단정한 정장", "personality": "냉철함",
+                            "talking_style": "건조한 말투"},
+                "on_mapping_failure": "random"}
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False,
+                                         encoding="utf-8") as f:
+            json.dump(spec, f, ensure_ascii=False)
+            path = f.name
+        try:
+            with mock.patch.object(self.cg, "_request_mapping",
+                                   return_value=(None, "테스트: LLM 미사용")):
+                result = self.cg.apply_character_spec(path=path)
+            self.assertEqual(config.sex, "남자")
+            self.assertEqual(config.age, 31)
+            self.assertEqual(config.job, "형사")
+            self.assertEqual(config.sex2, "여자")
+            self.assertTrue(config.is_locked("sex"))
+            # 성별 하드코딩 경로가 잠금을 존중하는지
+            character_setup.random_setup_all()
+            self.assertEqual(config.sex, "남자", "random_setup_all이 사용자 성별을 덮어씀")
+            self.assertEqual(config.job, "형사")
+        finally:
+            os.unlink(path)
+
+    def test_llm_failure_falls_back_to_random_not_silent(self):
+        """LLM 전면 실패 시 랜덤으로 채우되, 실패 내역을 보고해야 한다."""
+        import tempfile
+        from unittest import mock
+        spec = {"protagonist": {"sex": "여자", "age": 20, "job": "학생"},
+                "partner": {}, "on_mapping_failure": "random"}
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False,
+                                         encoding="utf-8") as f:
+            json.dump(spec, f, ensure_ascii=False)
+            path = f.name
+        try:
+            with mock.patch.object(self.cg, "_request_mapping",
+                                   return_value=(None, "서버 연결 실패")):
+                result = self.cg.apply_character_spec(path=path)
+            self.assertTrue(result["failed"], "실패를 조용히 숨기면 안 됨")
+            self.assertTrue(all(f.get("resolved_by") == "random" for f in result["failed"]))
+            self.assertIn(config.eye_color, self.candidates["eye_color"])
+            report = self.cg.format_failure_report(result["failed"])
+            self.assertIn("서버 연결 실패", report)
+        finally:
+            os.unlink(path)
+
+    def test_ask_policy_defers_to_caller(self):
+        import tempfile
+        from unittest import mock
+        spec = {"protagonist": {"sex": "여자"}, "partner": {},
+                "on_mapping_failure": "ask"}
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False,
+                                         encoding="utf-8") as f:
+            json.dump(spec, f, ensure_ascii=False)
+            path = f.name
+        try:
+            with mock.patch.object(self.cg, "_request_mapping",
+                                   return_value=(None, "실패")):
+                result = self.cg.apply_character_spec(path=path)
+            self.assertTrue(result["needs_user_choice"])
+            self.assertTrue(result["failed"])
+            # 수동 선택 반영
+            applied, rejected = self.cg.apply_manual_choices({"eye_color": 0})
+            self.assertEqual(rejected, [])
+            self.assertEqual(config.eye_color, self.candidates["eye_color"][0])
+        finally:
+            os.unlink(path)
+
+    def test_missing_file_is_not_an_error(self):
+        result = self.cg.apply_character_spec(path="/없는경로/character.json")
+        self.assertEqual(result["applied"], {})
+        self.assertEqual(result["failed"], [])
 
 
 class TestApiKey(unittest.TestCase):

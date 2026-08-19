@@ -1,4 +1,5 @@
 .env
+character.json
 *.bak
 *.pyc
 *.swp

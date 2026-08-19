@@ -26,11 +26,12 @@ def name_define(flag = True):
         config.nationality = nationality_tag[1] # Default to japanese
         if config.sex == "여자" or config.sex == "female":
             nametag = "female"
-        else:            
+        else:
             nametag = "male"
 
         name_tag_path = "./data/name/" + nametag + "_" + config.nationality + ".txt"
-        if config.name == "" or flag == True:
+        # character.json에서 이름을 지정했으면 랜덤으로 덮어쓰지 않는다
+        if not config.is_locked("name") and (config.name == "" or flag == True):
             config.name = random_prompt(name_tag_path, -1)
 
     # Character B setup
@@ -39,11 +40,11 @@ def name_define(flag = True):
 
         if config.sex2 == "여자":
             nametag2 = "female"
-        else:            
+        else:
             nametag2 = "male"
 
         name_tag2_path = "./data/name/" + nametag2 + "_" + config.nationality2 + ".txt"
-        if config.name2 == "" or flag == True:
+        if not config.is_locked("name2") and (config.name2 == "" or flag == True):
             config.name2 = random_prompt(name_tag2_path, -1)
 
 def set_inc_relationship():
@@ -287,13 +288,14 @@ def job_and_age_init():
 
 def personality_init(json_value):
     """성격, 말투 및 인생 목표를 설정하는 함수"""
-    # 1. 성격 태그 설정
-    tag = random_prompt("data/personality_tag.txt", json_value.get("personality", 0) - 1)
-    if tag:
-        # 태그에서 실제 성격 명칭 추출 (보통 #으로 구분)
-        config.personality_real = tag.split("#")[0].strip()
-    else:
-        config.personality_real = "평범한 성격"
+    # 1. 성격 태그 설정 (character.json/LLM이 확정했으면 유지)
+    if not config.is_locked("personality_real"):
+        tag = random_prompt("data/personality_tag.txt", json_value.get("personality", 0) - 1)
+        if tag:
+            # 태그에서 실제 성격 명칭 추출 (보통 #으로 구분)
+            config.personality_real = tag.split("#")[0].strip()
+        else:
+            config.personality_real = "평범한 성격"
     
     # 2. 성격 세부 설명(text) 설정
     try:
@@ -310,17 +312,19 @@ def personality_init(json_value):
     except Exception:
         config.personality_text = "특별한 특징이 없는 평범한 성격입니다."
 
-    # 3. 인생 목표 설정 (참조 디렉토리에서 명시적 로직을 찾지 못해 기본 랜덤 리스트 구현)
-    objectives = ["세계 평화", "부자가 되는 것", "진정한 사랑 찾기", "최고의 전문가 되기", "조용한 삶 살기", "복수 성공"]
-    config.objective = rand.choice(objectives)
+    # 3. 인생 목표 설정 (character.json/LLM이 생성했으면 유지)
+    if not config.is_locked("objective"):
+        objectives = ["세계 평화", "부자가 되는 것", "진정한 사랑 찾기", "최고의 전문가 되기", "조용한 삶 살기", "복수 성공"]
+        config.objective = rand.choice(objectives)
     config.happiness = 0
-    if (config.sex == "female"):
-        if (config.age < 20):
-            config.clothes = random_prompt("./data_comfyui/clothes_student.txt", -1)
-        else:        
-            config.clothes = random_prompt("./data_comfyui/clothes_adult.txt", -1)
-    else:
-        config.clothes = "평범한 남자 옷"
+    if not config.is_locked("clothes"):
+        if (config.sex == "female" or config.sex == "여자"):
+            if (config.age < 20):
+                config.clothes = random_prompt("./data_comfyui/clothes_student.txt", -1)
+            else:
+                config.clothes = random_prompt("./data_comfyui/clothes_adult.txt", -1)
+        else:
+            config.clothes = "평범한 남자 옷"
 
 def archetype_setup(json_value):
     """
@@ -368,14 +372,19 @@ def archetype_setup(json_value):
     # 여러 매칭 중 랜덤 선택
     selected = rand.choice(candidates)
 
-    # --- 외모 필드 오버라이드 ---
-    config.hair_color = selected.get("hair_color", config.hair_color)
-    config.hair_style = selected.get("hair_style", config.hair_style)
-    config.face_style = selected.get("face_style", config.face_style)
-    config.eye_color = selected.get("eye_color", config.eye_color)
-    config.skin_color = selected.get("skin_color", config.skin_color)
-    config.acc = selected.get("accessories", config.acc)
-    config.clothes = selected.get("clothes", config.clothes)
+    # --- 외모 필드 오버라이드 (character.json/LLM이 확정한 필드는 건너뜀) ---
+    def _arch_set(attr, key):
+        if config.is_locked(attr):
+            return
+        setattr(config, attr, selected.get(key, getattr(config, attr)))
+
+    _arch_set("hair_color", "hair_color")
+    _arch_set("hair_style", "hair_style")
+    _arch_set("face_style", "face_style")
+    _arch_set("eye_color", "eye_color")
+    _arch_set("skin_color", "skin_color")
+    _arch_set("acc", "accessories")
+    _arch_set("clothes", "clothes")
 
     # --- 체형: 문자열 → body_dic 인덱스로 변환 ---
     def _archetype_resolve_index(dic_key, arch_value):
@@ -395,27 +404,38 @@ def archetype_setup(json_value):
         return 0
 
     arch_breasts = selected.get("breasts_size", "")
-    if arch_breasts:
+    if arch_breasts and not config.is_locked("breasts_size"):
         config.breasts_size = _archetype_resolve_index("breasts_size", arch_breasts)
 
     arch_hip = selected.get("hip_size", "")
-    if arch_hip:
+    if arch_hip and not config.is_locked("hip_size"):
         config.hip_size = _archetype_resolve_index("hip_size", arch_hip)
 
     arch_body = selected.get("body_size", "")
-    if arch_body:
+    if arch_body and not config.is_locked("body_size"):
         config.body_size = _archetype_resolve_index("body_size", arch_body)
 
     # --- 성격 오버라이드 ---
     arch_personality = selected.get("personality", "")
-    if arch_personality:
+    if arch_personality and not config.is_locked("personality_real"):
         config.personality_real = arch_personality
 
 
 def random_setup_all():
-    """모든 캐릭터 설정을 랜덤하게 초기화하는 함수"""
-    # 성별은 여성으로 고정
-    config.sex = "female"
+    """모든 캐릭터 설정을 랜덤하게 초기화하는 함수.
+
+    character.json이 있으면 그 값을 먼저 반영하고(잠금), 나머지만 랜덤으로 채운다.
+    우선순위: 사용자 지정 > LLM 추론 > 랜덤
+    """
+    try:
+        import character_gen
+        character_gen.apply_character_spec()
+    except Exception as e:
+        print(f"[character] 설정 적용 실패({type(e).__name__}: {e}) — 랜덤 설정으로 진행")
+
+    # 성별 기본값은 여성. character.json에서 지정했으면 그 값을 유지한다.
+    if not config.is_locked("sex"):
+        config.sex = "female"
     
     # 이름 및 국적 설정
     name_define(True)
@@ -513,7 +533,7 @@ def character_init(sex, json_value):
         config.eye_color = random_prompt("data_comfyui/Eye_Color.txt", -1) + ","
 
     # Update face
-    if "face" in body_dic:
+    if "face" in body_dic and not config.is_locked("face_style"):
         config.face_style = body_dic["face"][rand.randint(0, len(body_dic["face"])-1)].strip()
 
     # Eyebrow
@@ -541,7 +561,8 @@ def character_init(sex, json_value):
     if rand.randint(1, 10) <= json_value.get("hairacc", 0):
         config.face_style += random_prompt("data_comfyui/Accessories_Hair.txt", -1)  + ","
 
-    config.acc = random_prompt("data_comfyui/accessory.txt", -1)
+    if not config.is_locked("acc"):
+        config.acc = random_prompt("data_comfyui/accessory.txt", -1)
 
     # Skin Color Setup
     if config.skin_color == "":
@@ -630,6 +651,11 @@ def character_sheet(love_value):
     character_sheet_add = "복장: " + config.clothes + "\n"
     character_sheet_text += character_sheet_add
 
+    # 태그로 표현되지 않은 외모 디테일 (character.json 자유 서술에서 추출)
+    appearance_note = getattr(config, "appearance_note", "")
+    if appearance_note:
+        character_sheet_text += "외모 특이사항: " + appearance_note + "\n"
+
     if config.json_value["extended"] == "yes":
         # 에피소드 인덱스가 있으면 해당 시점의 sheet 사용
         ep_index = getattr(config, 'current_episode_index', 0)
@@ -656,6 +682,9 @@ def partner_sheet():
     sheet_text += f"상대방 성별: {config.sex2}\n"
     sheet_text += f"상대방 직업: {config.job2}\n"
     sheet_text += f"상대방 외모: {config.appearance2}\n"
+    appearance_note2 = getattr(config, "appearance_note2", "")
+    if appearance_note2:
+        sheet_text += f"상대방 외모 특이사항: {appearance_note2}\n"
     sheet_text += f"상대방 성격: {config.personality2}\n"
     sheet_text += f"상대방 말투: {config.talking_style2}\n"
     sheet_text += f"상대방 복장: {getattr(config, 'outfit2', getattr(config, 'opponent_outfit', '미설정'))}\n"
