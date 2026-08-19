@@ -2,6 +2,7 @@
 *.bak
 *.pyc
 *.swp
+*.tmp
 /__pycache__
 /log
 /progress

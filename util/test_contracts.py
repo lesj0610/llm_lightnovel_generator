@@ -182,7 +182,7 @@ class TestArchiveAndExportContracts(unittest.TestCase):
         self.assertIn("실패", msg)
 
     def test_export_atomic_keeps_previous_on_failure(self):
-        """직렬화 실패 시 기존 복구 파일이 보존돼야 한다 (선삭제 후 쓰기 금지)."""
+        """직렬화 실패 시 기존 복구 파일 보존 + 부분 .tmp 잔존물 없음."""
         import tempfile
         from unittest import mock
         with tempfile.TemporaryDirectory() as tmp:
@@ -194,6 +194,44 @@ class TestArchiveAndExportContracts(unittest.TestCase):
             self.assertFalse(ok)
             with open(path, encoding="utf-8") as f:
                 self.assertIn("love_value: 1", f.read())
+            leftovers = [f for f in os.listdir(tmp) if f.endswith(".tmp")]
+            self.assertEqual(leftovers, [], "실패 시 부분 .tmp가 남으면 안 됨")
+
+    def test_archive_png_preserves_subdir_duplicates(self):
+        """ARCHIVE_PNG 활성 경로: 하위 디렉토리별 동명 PNG가 덮어써지지 않고
+        상대 경로로 보존돼야 하며 보고 개수와 실제 파일 수가 일치해야 한다."""
+        import tempfile
+        import urllib.request
+        from unittest import mock
+        old_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chdir(tmp)
+            try:
+                os.makedirs("result", exist_ok=True)
+                with open(os.path.join("result", "episode_01.md"), "w", encoding="utf-8") as f:
+                    f.write("# Episode 1\n\n내용")
+                comfy = os.path.join(tmp, "comfy")
+                for sub in ("a", "b"):
+                    os.makedirs(os.path.join(comfy, sub))
+                    with open(os.path.join(comfy, sub, "same.png"), "wb") as f:
+                        f.write(sub.encode())
+                from urllib.error import URLError
+                with mock.patch.object(gf, "ARCHIVE_PNG", True), \
+                     mock.patch.object(urllib.request, "urlopen",
+                                       side_effect=URLError("연결 없음")), \
+                     mock.patch.object(gf.time, "sleep"):
+                    ok, msg = gf.archive_to_done(comfyui_dir=comfy)
+                self.assertTrue(ok, msg)
+                self.assertIn("png=2개", msg)
+                a = os.path.join("done", "book1", "a", "same.png")
+                b = os.path.join("done", "book1", "b", "same.png")
+                self.assertTrue(os.path.isfile(a) and os.path.isfile(b))
+                with open(a, "rb") as f:
+                    self.assertEqual(f.read(), b"a")
+                with open(b, "rb") as f:
+                    self.assertEqual(f.read(), b"b")
+            finally:
+                os.chdir(old_cwd)
 
 
 class TestFinalizeAutoRun(unittest.TestCase):

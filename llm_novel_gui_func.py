@@ -483,6 +483,7 @@ def export_config_to_file(filepath: str) -> tuple:
         (success: bool, message: str) — 실패를 문자열로 위장하지 않는다.
     """
     # 반환 계약: (success: bool, message: str)
+    tmp_path = None
     try:
         # json_value는 제외: plot.json의 live 읽기(config.__getattr__)를
         # 고정 스냅샷으로 덮어쓰고, 키 등 설정 파일 내용이 export 파일에 복제되는 문제
@@ -574,18 +575,29 @@ def export_config_to_file(filepath: str) -> tuple:
             val = getattr(config, var, None)
             if val is not None:
                 vars_dict[var] = val
-        # 임시 파일에 완전히 쓴 뒤 원자적으로 교체 —
+        # 고유한 임시 파일에 완전히 쓴 뒤 원자적으로 교체 —
         # 기존 파일을 먼저 삭제하면 직렬화/쓰기 실패 시 마지막 정상 복구 파일도 소실됨
-        tmp_path = filepath + ".tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
+        import tempfile
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            prefix=os.path.basename(filepath) + ".",
+            suffix=".tmp", dir=os.path.dirname(filepath) or ".")
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
             yaml.dump(vars_dict, f, allow_unicode=True, default_flow_style=False,
                       sort_keys=False, width=120)
         os.replace(tmp_path, filepath)
+        tmp_path = None  # 교체 완료 — finally 정리 대상 아님
         logger.info("설정 내보내기 성공: %s (%d개 변수)", filepath, len(vars_dict))
         return True, f"설정 내보내기 성공: {filepath}"
     except Exception as e:
         logger.error("설정 내보내기 실패: %s", e)
         return False, f"설정 내보내기 실패: {e}"
+    finally:
+        # 실패 시 부분 내용이 담긴 임시 파일을 남기지 않는다
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
 
 def restore_config_from_file(filepath: str) -> tuple:
@@ -702,12 +714,16 @@ def archive_to_done(result_dir: str = "result", comfyui_dir: str = None, done_di
                 logger.info(f"ComfyUI 큐 대기 실패: {e} - 즉시 파일 복사")
 
             if os.path.exists(comfyui_dir):
+                import shutil
                 for root, dirs, files in os.walk(comfyui_dir):
                     for fname in files:
                         if fname.lower().endswith(".png"):
                             src = os.path.join(root, fname)
-                            dst = os.path.join(dest_dir, fname)
-                            import shutil
+                            # 상대 경로 보존: 하위 디렉토리별 동명 파일이
+                            # 평탄화로 조용히 덮어써지는 문제 방지
+                            rel = os.path.relpath(src, comfyui_dir)
+                            dst = os.path.join(dest_dir, rel)
+                            os.makedirs(os.path.dirname(dst), exist_ok=True)
                             shutil.copy2(src, dst)
                             png_count += 1
 
