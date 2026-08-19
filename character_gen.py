@@ -374,8 +374,12 @@ def _request_mapping(protagonist, partner, candidates, needed, log_fn=None):
         return None, f"LLM 응답 파싱 실패: {e}"
 
 
-def apply_character_spec(path=None, log_fn=None, policy_override=None):
+def apply_character_spec(path=None, log_fn=None, policy_override=None, force=False):
     """character.json을 읽어 config에 반영한다.
+
+    한 실행에서 한 번만 적용한다 (force=True면 재적용).
+    theme_gen_auto와 random_setup_all 양쪽에서 호출되므로 가드가 없으면
+    LLM 매핑이 두 번 호출되고 먼저 확정한 값이 다시 덮인다.
 
     Returns:
         dict {
@@ -390,7 +394,13 @@ def apply_character_spec(path=None, log_fn=None, policy_override=None):
         if log_fn:
             log_fn(f"[character_gen] {msg}")
 
+    if config.character_spec_applied and not force:
+        log("이미 적용됨 — 중복 적용/LLM 재호출 생략")
+        return {"applied": {}, "user_specified": [], "failed": [],
+                "policy": "", "needs_user_choice": False, "skipped": True}
+
     protagonist, partner, policy, exists = load_character_spec(path)
+    config.character_spec_applied = True
     if not exists:
         # character.json이 없으면 기존 랜덤 흐름을 그대로 둔다 (LLM 호출 없음)
         log("character.json 없음 — 기존 랜덤 설정 사용")

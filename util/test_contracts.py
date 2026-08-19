@@ -285,7 +285,12 @@ class TestCharacterGen(unittest.TestCase):
         self.cg = character_gen
         self.candidates = character_gen.load_candidates()
         config.locked_fields.clear()
-        self.addCleanup(config.locked_fields.clear)
+        config.character_spec_applied = False   # 테스트 간 상태 격리
+        self.addCleanup(self._reset_state)
+
+    def _reset_state(self):
+        config.locked_fields.clear()
+        config.character_spec_applied = False
 
     def test_personality_names_have_no_hash(self):
         """'###순수/평범'처럼 샵이 3개인 항목도 이름만 추출돼야 personality.txt 조회가 된다."""
@@ -445,6 +450,23 @@ class TestCharacterGen(unittest.TestCase):
         needed = self.cg._needed_fields({}, {})
         self.assertNotIn("appearance_note", needed)
         self.assertNotIn("personality_note", needed)
+
+    def test_applied_once_per_run(self):
+        """theme_gen_auto와 random_setup_all 양쪽에서 호출돼도 LLM 매핑은 1회."""
+        from unittest import mock
+        calls = []
+
+        def _fake(*a, **k):
+            calls.append(1)
+            return None, "테스트"
+
+        with mock.patch.object(self.cg, "_request_mapping", side_effect=_fake):
+            self.cg.apply_character_spec()
+            after_first = len(calls)   # 정책상 재시도가 있을 수 있음
+            second = self.cg.apply_character_spec()
+        self.assertTrue(second.get("skipped"), "두 번째 호출이 생략되지 않음")
+        self.assertEqual(len(calls), after_first,
+                         "두 번째 적용에서 LLM 매핑이 또 호출됨")
 
     def test_missing_file_is_not_an_error(self):
         result = self.cg.apply_character_spec(path="/없는경로/character.json")

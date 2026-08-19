@@ -96,6 +96,10 @@ talking_style2 = "평범하게 말함"
 # archetype_setup 등 후속 랜덤 로직이 이 필드들을 덮어쓰지 않도록 잠근다.
 locked_fields = set()
 
+# character.json 적용 완료 플래그. 한 실행에서 두 번 적용하면
+# LLM 매핑 호출이 중복되고, 먼저 적용된 값이 다시 덮인다.
+character_spec_applied = False
+
 
 def lock_field(name):
     """해당 필드를 후속 랜덤 오버라이드로부터 보호."""
