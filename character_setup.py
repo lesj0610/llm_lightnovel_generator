@@ -668,6 +668,11 @@ def character_sheet(love_value):
     if rel1_update:
         character_sheet_text += f"\n{rel1_update}\n"
 
+    # character.json 자유 서술에서 정규화된 성격 상세 (분류(personality_real)와 별개)
+    personality_note = getattr(config, "personality_note", "")
+    if personality_note:
+        character_sheet_text += "\n성격 상세: " + personality_note + "\n"
+
     character_sheet_text += "\n기타 특징\n\n" + config.personality_text + "\n"
 
     comfyui_prompt = ""
@@ -686,6 +691,9 @@ def partner_sheet():
     if appearance_note2:
         sheet_text += f"상대방 외모 특이사항: {appearance_note2}\n"
     sheet_text += f"상대방 성격: {config.personality2}\n"
+    personality_note2 = getattr(config, "personality_note2", "")
+    if personality_note2:
+        sheet_text += f"상대방 성격 상세: {personality_note2}\n"
     sheet_text += f"상대방 말투: {config.talking_style2}\n"
     sheet_text += f"상대방 복장: {getattr(config, 'outfit2', getattr(config, 'opponent_outfit', '미설정'))}\n"
     return sheet_text

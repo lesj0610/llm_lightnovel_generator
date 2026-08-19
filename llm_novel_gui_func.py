@@ -502,8 +502,9 @@ def export_config_to_file(filepath: str) -> tuple:
             "personality2", "outfit2", "talking_style2",
             "hair_color", "hair_style", "eye_color", "eye_shape", "skin_color",
             "face_style", "acc", "clothes",
-            # character.json/LLM이 만든 외모 특이사항 (저장 누락 시 소설 묘사에서 사라짐)
+            # character.json/LLM이 만든 자유 서술 (저장 누락 시 소설 묘사에서 사라짐)
             "appearance_note", "appearance_note2",
+            "personality_note", "personality_note2",
             "breasts_size", "hip_size", "body_size",
             "bimbo_clothes1", "bimbo_clothes2",
             "love_value",

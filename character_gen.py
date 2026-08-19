@@ -189,6 +189,9 @@ def build_mapping_prompt(protagonist, partner, candidates, needed):
         "   (예: 서술이 '밤갈색 머리'이면 brown 계열을 고르고 black을 고르지 마세요.)",
         "2. 서술에 없는 항목은 직업·나이·성별·분위기에서 자연스럽게 추론하세요.",
         "3. 주인공과 상대방의 조합이 이야기로 성립하도록 정하세요.",
+        "4. 사용자 서술이 영어·일본어 등 한국어가 아니어도 의미를 정확히 옮겨"
+        " **한국어로** 출력하세요. 원문을 그대로 복사하거나 음차하지 마세요.",
+        "   (선택 항목의 영어 태그는 예외 — 목록에 있는 그대로 번호로 답하세요.)",
         "",
         _spec_to_text(protagonist, "주인공"),
         "",
@@ -207,9 +210,12 @@ def build_mapping_prompt(protagonist, partner, candidates, needed):
         "## 출력 형식",
         "아래 JSON만 출력하세요. 설명·인사말·markdown 코드펜스를 쓰지 마세요.",
         "선택 항목은 반드시 정수 번호(index)로만 답하세요.",
-        "appearance_note에는 위 선택 태그로 표현되지 않은 외모 디테일만 한국어로 적으세요.",
-        "(예: 점 위치, 머리핀 모양, 입술 형태 등. 태그로 이미 표현된 것은 쓰지 마세요.)",
-        "지정된 외모 서술이 없으면 appearance_note는 빈 문자열로 두세요.",
+        "자유 서술 항목의 값은 모두 한국어 문장으로 작성하세요.",
+        "appearance_note: 위 선택 태그로 표현되지 않은 외모 디테일만 한국어로 적으세요.",
+        "  (예: 점 위치, 머리핀 모양, 입술 형태 등. 태그로 이미 표현된 것은 쓰지 마세요.)",
+        "  지정된 외모 서술이 없으면 빈 문자열로 두세요.",
+        "personality_note: 사용자가 적은 성격 서술을 한국어로 정확히 옮겨 적으세요.",
+        "  (personality_real은 목록에서 고른 분류이고, 이쪽은 그 인물만의 구체적인 성격입니다.)",
         "",
         json.dumps(
             {**{f: 0 for f in constrained},
@@ -295,15 +301,20 @@ _PROTAGONIST_FILL = [
     "face_style", "breasts_size", "hip_size", "body_size",
     "personality_real",
 ]
-_FREE_FILL = ["job", "job2", "objective", "appearance_note",
-              "appearance2", "personality2", "talking_style2"]
+_FREE_FILL = ["job", "job2", "objective",
+              "appearance_note", "personality_note",
+              "appearance2", "personality2", "personality_note2",
+              "talking_style2"]
 
-# character.json 키 -> config 속성 (주인공 / 상대방)
+# character.json 키 -> config 속성 (주인공 / 상대방).
+# 주의: 자유 서술(appearance/personality)은 여기 두지 않는다.
+#   - personality_real은 personality.txt의 20종 분류 키라서 자유 문장을 넣으면
+#     상세 설명 조회가 실패한다. LLM이 서술을 읽고 분류하고,
+#     서술 원문은 personality_note로 한국어 정규화해 저장한다.
+#   - appearance도 같은 이유로 태그(제약)와 appearance_note(자유)로 나뉜다.
 _SPEC_TO_CONFIG = {
-    "protagonist": {"name": "name", "sex": "sex", "age": "age", "job": "job",
-                    "personality": "personality_real"},
+    "protagonist": {"name": "name", "sex": "sex", "age": "age", "job": "job"},
     "partner": {"name": "name2", "sex": "sex2", "age": "age2", "job": "job2",
-                "appearance": "appearance2", "personality": "personality2",
                 "talking_style": "talking_style2"},
 }
 
@@ -315,26 +326,36 @@ def _apply_value(attr, value):
 
 
 def _needed_fields(protagonist, partner):
-    """사용자가 지정하지 않아 LLM이 채워야 할 필드 목록."""
-    needed = list(_PROTAGONIST_FILL)
-    # 사용자가 성격을 직접 서술했으면 personality_real 선택은 여전히 필요
-    # (personality.txt 조회용 분류이므로 서술과 별개로 하나 골라야 함)
+    """사용자가 지정하지 않아 LLM이 채워야 할 필드 목록.
+
+    자유 서술(appearance/personality)은 지정돼 있어도 LLM을 거친다 —
+    태그로 분류하고, 원문을 한국어로 정규화해 *_note에 담아야 하기 때문이다.
+    """
+    needed = list(_PROTAGONIST_FILL)      # 제약 필드(태그·분류)는 항상 선택 필요
+    free = list(_FREE_FILL)
+
+    def _drop(*fields):
+        for f in fields:
+            if f in free:
+                free.remove(f)
+
     if protagonist.get("job"):
-        needed_free = [f for f in _FREE_FILL if f != "job"]
-    else:
-        needed_free = list(_FREE_FILL)
+        _drop("job")
     if partner.get("job"):
-        needed_free = [f for f in needed_free if f != "job2"]
-    if partner.get("appearance"):
-        needed_free = [f for f in needed_free if f != "appearance2"]
-    if partner.get("personality"):
-        needed_free = [f for f in needed_free if f != "personality2"]
+        _drop("job2")
     if partner.get("talking_style"):
-        needed_free = [f for f in needed_free if f != "talking_style2"]
+        _drop("talking_style2")
+
+    # 서술이 없으면 note도 만들지 않는다 (태그/기본값만으로 충분)
     if not protagonist.get("appearance"):
-        # 외모 서술이 없으면 특이사항도 만들지 않는다 (태그만으로 충분)
-        needed_free = [f for f in needed_free if f != "appearance_note"]
-    return needed + needed_free
+        _drop("appearance_note")
+    if not protagonist.get("personality"):
+        _drop("personality_note")
+    if not partner.get("personality"):
+        _drop("personality_note2")
+    # 상대방 외모/성격 요약은 서술이 있으면 그것을 한국어로 정규화해 쓰고,
+    # 없으면 LLM이 새로 만든다 — 어느 쪽이든 LLM을 거친다.
+    return needed + free
 
 
 def _request_mapping(protagonist, partner, candidates, needed, log_fn=None):

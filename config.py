@@ -105,9 +105,12 @@ def lock_field(name):
 def is_locked(name) -> bool:
     return name in locked_fields
 
-# 태그로 표현되지 않는 외모 디테일 (LLM이 자유 서술에서 추출, 소설 프롬프트에 전달)
-appearance_note = ""    # 주인공
-appearance_note2 = ""   # 상대방
+# 자유 서술 필드 (LLM이 한국어로 정규화해 저장, 소설 프롬프트에 그대로 전달).
+# 분류 태그(personality_real)나 danbooru 태그로는 표현되지 않는 디테일을 담는다.
+appearance_note = ""     # 주인공 외모 특이사항
+appearance_note2 = ""    # 상대방 외모 특이사항
+personality_note = ""    # 주인공 성격 상세 (personality_real은 20종 분류 키라 따로 둠)
+personality_note2 = ""   # 상대방 성격 상세
 
 # Appearance (Character A)
 hair_color = ""

@@ -402,6 +402,50 @@ class TestCharacterGen(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_free_personality_does_not_pollute_classifier(self):
+        """자유 성격 서술이 personality_real(20종 분류 키)로 직행하면
+        personality.txt 상세 조회가 실패한다 — 반드시 분리돼야 한다."""
+        import tempfile
+        from unittest import mock
+        spec = {"protagonist": {"sex": "여자", "age": 22, "job": "아이돌",
+                                "personality": "겉으로는 침착하지만 속으로는 외로움을 많이 탄다"},
+                "partner": {}, "on_mapping_failure": "random"}
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False,
+                                         encoding="utf-8") as f:
+            json.dump(spec, f, ensure_ascii=False)
+            path = f.name
+        try:
+            with mock.patch.object(self.cg, "_request_mapping",
+                                   return_value=(None, "LLM 미사용")):
+                self.cg.apply_character_spec(path=path)
+            # 서술이 분류 키를 오염시키지 않아야 한다
+            self.assertNotIn("침착", config.personality_real or "")
+            # 랜덤 폴백이라도 분류는 20종 중 하나여야 상세 조회가 된다
+            self.assertIn(config.personality_real, self.candidates["personality_real"])
+            character_setup.personality_init(config.json_value)
+            self.assertTrue(config.personality_text,
+                            "personality.txt 상세 조회가 비었음")
+        finally:
+            os.unlink(path)
+
+    def test_free_text_fields_are_not_in_direct_mapping(self):
+        """appearance/personality는 config로 직결되지 않는다 (LLM 정규화 경유)."""
+        proto_map = self.cg._SPEC_TO_CONFIG["protagonist"]
+        self.assertNotIn("personality", proto_map)
+        self.assertNotIn("appearance", proto_map)
+        partner_map = self.cg._SPEC_TO_CONFIG["partner"]
+        self.assertNotIn("personality", partner_map)
+        self.assertNotIn("appearance", partner_map)
+
+    def test_note_fields_requested_only_when_described(self):
+        needed = self.cg._needed_fields(
+            {"appearance": "긴 머리", "personality": "차분함"}, {})
+        self.assertIn("appearance_note", needed)
+        self.assertIn("personality_note", needed)
+        needed = self.cg._needed_fields({}, {})
+        self.assertNotIn("appearance_note", needed)
+        self.assertNotIn("personality_note", needed)
+
     def test_missing_file_is_not_an_error(self):
         result = self.cg.apply_character_spec(path="/없는경로/character.json")
         self.assertEqual(result["applied"], {})
