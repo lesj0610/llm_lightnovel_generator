@@ -16,6 +16,28 @@ def flag_on(value) -> bool:
     return value in ("yes", True, "1", 1)
 
 
+def get_env_file_value(name: str):
+    """저장소 루트의 .env 파일에서 값을 읽습니다 (KEY=VALUE 형식, # 주석 허용).
+
+    .env는 .gitignore에 있어 커밋되지 않습니다. 외부 의존성 없이 직접 파싱합니다.
+    """
+    env_path = _BASE_DIR / '.env'
+    if not env_path.is_file():
+        return None
+    try:
+        with open(env_path, encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                key, _, value = line.partition('=')
+                if key.strip() == name:
+                    return value.strip().strip('"').strip("'")
+    except OSError:
+        return None
+    return None
+
+
 def __getattr__(name):
     # config.json_value 접근을 항상 live 읽기로 연결 (import 시점 스냅샷 제거).
     # 기존 28곳의 config.json_value 사용처가 수정 없이 최신 plot.json을 보게 됩니다.

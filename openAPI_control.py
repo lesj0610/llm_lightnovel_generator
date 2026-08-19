@@ -50,17 +50,18 @@ RETRYABLE_STATUS = {408, 409, 429, 500, 502, 503, 504}
 # =====================================================================
 
 def get_api_key() -> str:
-    """API 키를 환경변수 OPENAI_API_KEY에서만 읽습니다.
+    """API 키를 읽습니다. 우선순위: 환경변수 OPENAI_API_KEY > 저장소 루트 .env 파일.
 
-    설정 파일 fallback은 공개 저장소 커밋 유출 위험 때문에 지원하지 않습니다.
+    plot.json 같은 tracked 설정 파일 fallback은 공개 저장소 커밋 유출 위험 때문에
+    지원하지 않습니다. .env는 .gitignore 대상이라 커밋되지 않습니다.
     키가 없으면 시작 단계에서 명시적으로 실패합니다.
     """
-    key = os.environ.get("OPENAI_API_KEY")
+    key = os.environ.get("OPENAI_API_KEY") or config.get_env_file_value("OPENAI_API_KEY")
     if not key:
         raise LLMRequestError(
-            "OPENAI_API_KEY 환경변수가 설정되지 않았습니다. "
-            "서버를 --api-key로 띄웠다면 같은 값을 export 하세요. "
-            "예: export OPENAI_API_KEY=<키>")
+            "API 키가 없습니다. 저장소 루트에 .env 파일을 만들어 "
+            "OPENAI_API_KEY=<서버 --api-key 값> 을 적거나, "
+            "환경변수 OPENAI_API_KEY를 export 하세요. (.env.example 참고)")
     return key
 
 

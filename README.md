@@ -16,9 +16,11 @@
 
 "mainLLM": "gemma",
 
-2. API 키는 plot.json이 아니라 환경변수로 설정해 주세요. (저장소에 키가 커밋되는 사고 방지)
+2. API 키는 plot.json이 아니라 .env 파일에 넣어 주세요. (저장소에 키가 커밋되는 사고 방지 — .env는 gitignore 대상)
 
-export OPENAI_API_KEY=서버를_띄울_때_쓴_--api-key_값
+cp .env.example .env 후 .env 안의 OPENAI_API_KEY에 서버를 띄울 때 쓴 --api-key 값을 넣으면 됩니다.
+
+(환경변수 OPENAI_API_KEY가 설정돼 있으면 그쪽이 우선합니다)
 
 3. 디렉토리에서 파이썬 virtual 환경을 만들어 주세요.
 
