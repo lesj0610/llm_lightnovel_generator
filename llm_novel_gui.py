@@ -396,7 +396,7 @@ class LLMNovelGUI:
         else:
             self.scroll_offset = 0
 
-    def _export_config_to_file(self, filepath: str) -> str:
+    def _export_config_to_file(self, filepath: str) -> tuple:
         """config 변수를 config.py 정의 순서대로 내보냅니다."""
         return llm_novel_gui_func.export_config_to_file(filepath)
 
@@ -922,8 +922,8 @@ class LLMNovelGUI:
                             
                             # config_export.yaml 저장 (1번 플롯 생성 후)
                             export_path = os.path.join("data", "config_export.yaml")
-                            self._export_config_to_file(export_path)
-                            llm_novel_gui_func.logger.info(f"config_export.yaml 저장 완료 (1번 플롯 생성 후): {export_path}")
+                            _exp_ok, _exp_msg = self._export_config_to_file(export_path)
+                            llm_novel_gui_func.logger.info(f"config_export.yaml 저장 {'완료' if _exp_ok else '실패'} (1번 플롯 생성 후): {_exp_msg}")
 
                             # theme_auto 모드이면 progress 저장
                             if use_theme_auto:
@@ -1569,8 +1569,8 @@ class LLMNovelGUI:
                         # 7번: 설정 내보내기 (Export Config)
                         try:
                             export_path = os.path.join("data", "config_export.yaml")
-                            result = self._export_config_to_file(export_path)
-                            self.content_text = result
+                            _exp_ok, _exp_msg = self._export_config_to_file(export_path)
+                            self.content_text = _exp_msg if _exp_ok else f"[실패] {_exp_msg}"
                         except Exception as e:
                             self.content_text = f"설정 내보내기 중 오류 발생:\n{e}"
                         self.content_selection = 0

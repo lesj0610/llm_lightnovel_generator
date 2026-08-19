@@ -354,8 +354,8 @@ class FourPaneApp(App):
             )
 
             export_path = os.path.join("data", "config_export.yaml")
-            llm_novel_gui_func.export_config_to_file(export_path)
-            llm_novel_gui_func.logger.info(f"config_export.yaml 저장 완료 (Step2 후): {export_path}")
+            _exp_ok, _exp_msg = llm_novel_gui_func.export_config_to_file(export_path)
+            llm_novel_gui_func.logger.info(f"config_export.yaml 저장 {'완료' if _exp_ok else '실패'} (Step2 후): {_exp_msg}")
 
             llm_novel_gui_func.complete_theme_auto()
             prog_msg = self._generate_and_parse_progression()
@@ -560,8 +560,9 @@ class FourPaneApp(App):
         """8번 메뉴: 설정 내보내기"""
         try:
             filepath = os.path.join("data", "config_export.yaml")
-            result = llm_novel_gui_func.export_config_to_file(filepath)
-            self.call_from_thread(self._update_ui, editor_text=f"{result}\n\n파일: {filepath}", status_text="상태: 설정 내보내기 완료", readonly=True)
+            ok, message = llm_novel_gui_func.export_config_to_file(filepath)
+            status = "상태: 설정 내보내기 완료" if ok else "상태: 설정 내보내기 실패"
+            self.call_from_thread(self._update_ui, editor_text=f"{message}\n\n파일: {filepath}", status_text=status, readonly=True)
         except Exception as e:
             self.call_from_thread(self._update_ui, editor_text=f"설정 내보내기 오류: {e}", status_text="상태: 오류")
         self.call_from_thread(self._focus_menu)

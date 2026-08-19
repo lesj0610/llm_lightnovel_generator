@@ -751,7 +751,9 @@ class FourPaneApp(App):
                 num_episodes=config.total_episodes,
                 log_fn=gui_log
             )
-            llm_novel_gui_func.export_config_to_file(os.path.join("data", "config_export.yaml"))
+            _exp_ok, _exp_msg = llm_novel_gui_func.export_config_to_file(os.path.join("data", "config_export.yaml"))
+            if not _exp_ok:
+                raise RuntimeError(f"복구 상태 저장 실패: {_exp_msg}")
             llm_novel_gui_func.complete_theme_auto()
             prog_msg = self._generate_and_parse_progression()
 
@@ -840,8 +842,9 @@ class FourPaneApp(App):
     def _worker_export_config(self) -> None:
         try:
             filepath = os.path.join("data", "config_export.yaml")
-            result = llm_novel_gui_func.export_config_to_file(filepath)
-            self.call_from_thread(self._finish_worker, editor_text=f"{result}\n\n파일: {filepath}", status_msg="설정 내보내기 완료", readonly=True)
+            ok, message = llm_novel_gui_func.export_config_to_file(filepath)
+            status = "설정 내보내기 완료" if ok else "설정 내보내기 실패"
+            self.call_from_thread(self._finish_worker, editor_text=f"{message}\n\n파일: {filepath}", status_msg=status, readonly=True)
         except Exception as e:
             self.call_from_thread(self._finish_worker, editor_text=f"설정 내보내기 오류: {e}", status_msg="오류 발생")
 

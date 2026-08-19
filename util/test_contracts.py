@@ -124,6 +124,21 @@ class TestConfigLoaders(unittest.TestCase):
 
 
 class TestRunId(unittest.TestCase):
+    """임시 디렉토리에서 실행 — 실제 result/latest를 절대 건드리지 않는다."""
+
+    def setUp(self):
+        import tempfile
+        self._old_cwd = os.getcwd()
+        self._old_run_id = config.current_run_id
+        self._tmp = tempfile.TemporaryDirectory()
+        os.chdir(self._tmp.name)
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        os.chdir(self._old_cwd)
+        config.current_run_id = self._old_run_id
+        self._tmp.cleanup()
+
     def test_run_ids_unique_within_same_second(self):
         import full_episode_gen as feg
         ids = set()
@@ -132,11 +147,34 @@ class TestRunId(unittest.TestCase):
             feg._ensure_run_dir()
             ids.add(config.current_run_id)
         self.assertEqual(len(ids), 5)
-        # 정리
-        import shutil
-        for rid in ids:
-            shutil.rmtree(os.path.join("result", rid), ignore_errors=True)
-        config.current_run_id = ""
+        # latest 포인터는 임시 디렉토리 안에만 생성됐는지 확인
+        self.assertTrue(os.path.isfile(os.path.join("result", "latest")))
+
+
+class TestArchiveAndExportContracts(unittest.TestCase):
+    def test_archive_returns_tuple_and_succeeds_on_empty(self):
+        """archive_to_done는 (ok, msg) 계약 — png_count 미정의로 항상 실패하던 버그 회귀 방지."""
+        import tempfile
+        from unittest import mock
+        old_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chdir(tmp)
+            try:
+                os.makedirs("result", exist_ok=True)
+                with open(os.path.join("result", "episode_01.md"), "w", encoding="utf-8") as f:
+                    f.write("# Episode 1\n\n내용")
+                # ComfyUI 큐 대기 sleep은 테스트에서 무력화 (실서비스 로직 무변경)
+                with mock.patch.object(gf.time, "sleep"):
+                    ok, msg = gf.archive_to_done(comfyui_dir=os.path.join(tmp, "없는경로"))
+                self.assertTrue(ok, msg)
+                self.assertIn("아카이브 완료", msg)
+            finally:
+                os.chdir(old_cwd)
+
+    def test_export_returns_tuple_failure(self):
+        ok, msg = gf.export_config_to_file("/없는디렉토리/x/y.yaml")
+        self.assertFalse(ok)
+        self.assertIn("실패", msg)
 
 
 class TestGenerateRefineContract(unittest.TestCase):

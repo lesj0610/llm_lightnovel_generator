@@ -476,8 +476,13 @@ def generate_story(ep_num: int, callback=None):
 # Config 파일 내보내기/복구
 # -------------------------------------------------------------------------
 
-def export_config_to_file(filepath: str) -> str:
-    """config 변수를 config.py 정의 순서대로 YAML 파일로 내보냅니다."""
+def export_config_to_file(filepath: str) -> tuple:
+    """config 변수를 config.py 정의 순서대로 YAML 파일로 내보냅니다.
+
+    Returns:
+        (success: bool, message: str) — 실패를 문자열로 위장하지 않는다.
+    """
+    # 반환 계약: (success: bool, message: str)
     try:
         # json_value는 제외: plot.json의 live 읽기(config.__getattr__)를
         # 고정 스냅샷으로 덮어쓰고, 키 등 설정 파일 내용이 export 파일에 복제되는 문제
@@ -576,10 +581,10 @@ def export_config_to_file(filepath: str) -> str:
             yaml.dump(vars_dict, f, allow_unicode=True, default_flow_style=False,
                       sort_keys=False, width=120)
         logger.info("설정 내보내기 성공: %s (%d개 변수)", filepath, len(vars_dict))
-        return f"설정 내보내기 성공: {filepath}"
+        return True, f"설정 내보내기 성공: {filepath}"
     except Exception as e:
         logger.error("설정 내보내기 실패: %s", e)
-        return f"설정 내보내기 실패: {e}"
+        return False, f"설정 내보내기 실패: {e}"
 
 
 def restore_config_from_file(filepath: str) -> tuple:
@@ -686,8 +691,8 @@ def archive_to_done(result_dir: str = "result", comfyui_dir: str = None, done_di
         except Exception as e:
             logger.info(f"ComfyUI 큐 대기 실패: {e} - 즉시 파일 복사")
 
-        ## 4. ComfyUI output의 .png 파일 복사 (하위 디렉토리 포함)
-        #png_count = 0
+        ## 4. ComfyUI output의 .png 파일 복사 (하위 디렉토리 포함) — 현재 비활성
+        png_count = 0
         #if os.path.exists(comfyui_dir):
         #    for root, dirs, files in os.walk(comfyui_dir):
         #        for fname in files:
@@ -699,10 +704,10 @@ def archive_to_done(result_dir: str = "result", comfyui_dir: str = None, done_di
         #                png_count += 1
 
         logger.info("아카이브 완료: %s (md=%d, png=%d)", dest_dir, md_count, png_count)
-        return f"아카이브 완료: {dest_dir} (markdown={md_count}개, png={png_count}개)"
+        return True, f"아카이브 완료: {dest_dir} (markdown={md_count}개, png={png_count}개)"
     except Exception as e:
         logger.error("아카이브 실패: %s", e)
-        return f"아카이브 실패: {e}"
+        return False, f"아카이브 실패: {e}"
 
 
 # -------------------------------------------------------------------------
@@ -1243,7 +1248,9 @@ def run_auto_sequence(
             complete_theme_auto()
             _menu1_logger.info(f"[10번] theme_auto 1번 완료 저장됨 (hash={config.plot_hash})")
 
-        export_config_to_file(export_path)
+        export_ok, export_msg = export_config_to_file(export_path)
+        if not export_ok:
+            raise RuntimeError(f"복구 상태 저장 실패: {export_msg} — 자동 실행을 중단합니다")
         cb("init", "초기화 완료", "[전체 자동 실행]\n\n1. 초기화 완료")
 
         # =========================================================
@@ -1284,7 +1291,9 @@ def run_auto_sequence(
             config.plot_result = plot_text + f"\n\n[업데이트된 테마]\n{theme_result['theme']}"
             _menu1_logger.info("[10번] theme_agent 업데이트 완료")
 
-        export_config_to_file(export_path)
+        export_ok, export_msg = export_config_to_file(export_path)
+        if not export_ok:
+            raise RuntimeError(f"복구 상태 저장 실패: {export_msg} — 자동 실행을 중단합니다")
         cb("plot", "1번: 플롯 생성 완료", "[전체 자동 실행]\n\n1. 초기화 완료\n\n2. 1번: 플롯 생성 완료")
 
         # =========================================================
@@ -1392,7 +1401,9 @@ def run_auto_sequence(
             saved_ep_files = save_episodes_and_sheets_to_progress(plot_hash)
             _menu1_logger.info(f"[10번] progress 저장 완료: {len(saved_ep_files)}개 파일")
 
-        export_config_to_file(export_path)
+        export_ok, export_msg = export_config_to_file(export_path)
+        if not export_ok:
+            raise RuntimeError(f"복구 상태 저장 실패: {export_msg} — 자동 실행을 중단합니다")
         cb("episode", "4번: 에피소드 생성 완료", "[전체 자동 실행]\n\n1. 초기화 완료\n\n2. 1번: 플롯 생성 완료\n\n3. 4번: 에피소드 생성 완료")
 
         # =========================================================
@@ -1460,9 +1471,19 @@ def run_auto_sequence(
 
         # 아카이브: result/의 markdown과 ComfyUI output의 png를 done/book{N}/로 이동
         _menu1_logger.info("[10번] 아카이브 시작...")
-        archive_result = archive_to_done()
-        _menu1_logger.info(archive_result)
-        content_text += f"\n\n6. 아카이브 완료: {archive_result}"
+        archive_ok, archive_msg = archive_to_done()
+        _menu1_logger.info(archive_msg)
+        if not archive_ok:
+            # 소설 생성은 완료됐으나 아카이브 실패 — 완료로 위장하지 않는다
+            _menu1_logger.warning(f"[10번] 아카이브 실패 — 부분 완료로 종료: {archive_msg}")
+            content_text += f"\n\n6. 아카이브 실패: {archive_msg}\n(생성 결과는 result/에 남아 있습니다)"
+            cb("done", "부분 완료 (아카이브 실패)", content_text)
+            return {
+                "success": False,
+                "content_text": content_text,
+                "current_file_index": current_file_index,
+            }
+        content_text += f"\n\n6. {archive_msg}"
         cb("done", "전체 자동 실행 완료", content_text)
 
         return {
