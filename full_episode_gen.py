@@ -7,7 +7,71 @@ import time
 import json
 import traceback
 from common_def import get_particles
-from openAPI_control import call_openai_for_plot
+from openAPI_control import call_openai_for_plot, LLMRequestError
+import quality_gate
+
+
+def _make_notifier(callback, info_lines):
+    """단계별 진행 상태를 info_lines와 callback 양쪽에 전달하는 notifier를 만듭니다.
+    (기존에는 callback 파라미터가 한 번도 호출되지 않았음)"""
+    def _notify(status):
+        info_lines["status"] = status
+        if callback:
+            try:
+                callback("", info_lines)
+            except Exception:
+                pass  # 진행 표시 실패가 생성을 중단시키면 안 됨
+    return _notify
+
+
+def _generate_part_with_gate(sec_name, user_prompt, messages, log, current_ep):
+    """파트 생성 + 품질 게이트 검사. 위반 시 1회 재작성 후 진행합니다."""
+    result, messages = call_openai_for_plot(user_prompt, messages=messages, log_fn=log)
+    issues = quality_gate.check_section(result, sec_name)
+    if issues:
+        log(f"[EP{current_ep}] [QUALITY_GATE] '{sec_name}' 위반: {issues} — 1회 재작성")
+        retry_prompt = quality_gate.build_retry_prompt(sec_name, issues)
+        result, messages = call_openai_for_plot(retry_prompt, messages=messages, log_fn=log)
+        remaining = quality_gate.check_section(result, sec_name)
+        if remaining:
+            log(f"[EP{current_ep}] [QUALITY_GATE] '{sec_name}' 재작성 후 잔존 위반: {remaining} — 그대로 진행")
+    return result, messages
+
+
+def _ensure_run_dir():
+    """result/<run_id>/ 디렉토리를 보장하고 latest 포인터를 갱신합니다."""
+    if not config.current_run_id:
+        config.current_run_id = time.strftime("%Y%m%d_%H%M%S")
+    run_dir = os.path.join("result", config.current_run_id)
+    os.makedirs(run_dir, exist_ok=True)
+    _atomic_write(os.path.join("result", "latest"), config.current_run_id)
+    return run_dir
+
+
+def _atomic_write(path, text):
+    """임시 파일에 쓴 뒤 os.replace로 원자적으로 교체합니다 (부분 쓰기 방지)."""
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp_path, path)
+
+
+def _update_manifest(run_dir, ep_num, status):
+    """run 디렉토리의 manifest.json에 에피소드 상태를 기록합니다."""
+    manifest_path = os.path.join(run_dir, "manifest.json")
+    try:
+        with open(manifest_path, encoding="utf-8") as f:
+            manifest = json.load(f)
+    except Exception:
+        jv = config.get_json_value()
+        manifest = {
+            "run_id": config.current_run_id,
+            "model": jv.get("model_main", ""),
+            "started": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "episodes": {},
+        }
+    manifest["episodes"][str(ep_num)] = status
+    _atomic_write(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2))
 
 # =============================================================================
 # episode/ 디렉토리에서 데이터 로드 (prompts.txt, variables.json)
@@ -312,15 +376,17 @@ def _extract_kiskungjeonkyeol(episode_content):
 # =============================================================================
 
 def full_episode_gen(ep_num=0, callback=None, log_file_name="debug_api_episode.log"):
-    try:
-        _log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "log")
-        os.makedirs(_log_dir, exist_ok=True)
-        log_file = open(os.path.join(_log_dir, log_file_name), "a", encoding="utf-8")
-        def log(msg):
-            timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
-            log_file.write(f"[{timestamp}] {msg}\n")
-            log_file.flush()
+    # 로그 초기화는 try 밖에서: 이 단계가 실패하면 except 블록의 log()/log_file.close()가
+    # UnboundLocalError로 원래 예외를 가리는 문제가 있었음
+    _log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "log")
+    os.makedirs(_log_dir, exist_ok=True)
+    log_file = open(os.path.join(_log_dir, log_file_name), "a", encoding="utf-8")
+    def log(msg):
+        timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+        log_file.write(f"[{timestamp}] {msg}\n")
+        log_file.flush()
 
+    try:
         log("=" * 60)
         log(f"[full_episode_gen] 시작 시간: {time.strftime('%Y-%m-%d %H:%M:%S')}")
         log(f"에피소드 번호: {ep_num}")
@@ -387,6 +453,8 @@ def full_episode_gen(ep_num=0, callback=None, log_file_name="debug_api_episode.l
                 "current_episode": current_ep,
                 "status": f"[EP{current_ep}/{config.total_episodes}] 캐릭터 시트 주입..."
             }
+            _notify = _make_notifier(callback, info_lines)
+            _notify(info_lines["status"])
 
             ep_content_raw = config.episode_content[current_ep - 1] if current_ep - 1 < len(config.episode_content) else ""
             log(f"[EP{current_ep}] [DEBUG] episode_content[{current_ep-1}] 길이: {len(ep_content_raw)}")
@@ -494,7 +562,7 @@ def full_episode_gen(ep_num=0, callback=None, log_file_name="debug_api_episode.l
 {prev_conclusion}...
 """
 
-            info_lines["status"] = f"[EP{current_ep}/{config.total_episodes}] 기(Introduction) 작성..."
+            _notify(f"[EP{current_ep}/{config.total_episodes}] 기(Introduction) 작성...")
             ki_content = ep_sections.get('기', '')
             log(f"[EP{current_ep}] [DEBUG] ki_content 길이: {len(ki_content)}")
             ki_prompt_extra = ""
@@ -559,13 +627,13 @@ def full_episode_gen(ep_num=0, callback=None, log_file_name="debug_api_episode.l
             )
             log(f"[EP{current_ep}] [PROMPT_1] Part 1: Introduction (1차/2차 호출 통합)")
             messages = [{"role": "system", "content": config.system_prompt}]
-            part1_result, messages = call_openai_for_plot(user_prompt, messages=messages, log_fn=log)
+            part1_result, messages = _generate_part_with_gate("기", user_prompt, messages, log, current_ep)
             log(f"[EP{current_ep}] [USER]\n{user_prompt}...")
             log(f"[EP{current_ep}] [AI]\n{part1_result}...")
             full_response = f"## EPISODE {current_ep} ##\n" + part1_result
 
             # Part 2 - 승
-            info_lines["status"] = f"[EP{current_ep}/{config.total_episodes}] 승(Development) 작성..."
+            _notify(f"[EP{current_ep}/{config.total_episodes}] 승(Development) 작성...")
             seung_content = ep_sections.get('승', '')
             seung_prompt_extra = ""
             if seung_content:
@@ -593,13 +661,13 @@ def full_episode_gen(ep_num=0, callback=None, log_file_name="debug_api_episode.l
                 genre_tone_hint=genre_tone_hint
             )
             log(f"[EP{current_ep}] [PROMPT_2] Part 2: Development")
-            part2_result, messages = call_openai_for_plot(user_prompt, messages=messages, log_fn=log)
+            part2_result, messages = _generate_part_with_gate("승", user_prompt, messages, log, current_ep)
             log(f"[EP{current_ep}] [USER]\n{user_prompt}...")
             log(f"[EP{current_ep}] [AI]\n{part2_result}...")
             full_response += "\n\n------------------------\n#####\n\n" + part2_result
 
             # Part 3 - 전
-            info_lines["status"] = f"[EP{current_ep}/{config.total_episodes}] 전(Climax) 작성..."
+            _notify(f"[EP{current_ep}/{config.total_episodes}] 전(Climax) 작성...")
             jeon_content = ep_sections.get('전', '')
             jeon_prompt_extra = ""
             if jeon_content:
@@ -629,13 +697,13 @@ def full_episode_gen(ep_num=0, callback=None, log_file_name="debug_api_episode.l
                 genre_tone_hint=genre_tone_hint
             )
             log(f"[EP{current_ep}] [PROMPT_3] Part 3: Climax")
-            part3_result, messages = call_openai_for_plot(user_prompt, messages=messages, log_fn=log)
+            part3_result, messages = _generate_part_with_gate("전", user_prompt, messages, log, current_ep)
             log(f"[EP{current_ep}] [USER]\n{user_prompt}...")
             log(f"[EP{current_ep}] [AI]\n{part3_result}...")
             full_response += "\n\n------------------------\n#####\n\n" + part3_result
 
             # Part 4 - 결
-            info_lines["status"] = f"[EP{current_ep}/{config.total_episodes}] 결(Conclusion) 작성..."
+            _notify(f"[EP{current_ep}/{config.total_episodes}] 결(Conclusion) 작성...")
             gyeol_content = ep_sections.get('결', '')
             gyeol_prompt_extra = ""
             if gyeol_content:
@@ -667,7 +735,7 @@ def full_episode_gen(ep_num=0, callback=None, log_file_name="debug_api_episode.l
                 genre_tone_hint=genre_tone_hint
             )
             log(f"[EP{current_ep}] [PROMPT_4] Part 4: Conclusion (진행도={int(progress_ratio*100)}%, 감정선={protagonist_mood[:20]}..., 파트너행동={partner_action[:20]}...)")
-            part4_result, messages = call_openai_for_plot(user_prompt, messages=messages, log_fn=log)
+            part4_result, messages = _generate_part_with_gate("결", user_prompt, messages, log, current_ep)
             log(f"[EP{current_ep}] [USER]\n{user_prompt}...")
             log(f"[EP{current_ep}] [AI]\n{part4_result}...")
             full_response += "\n\n------------------------\n#####\n\n" + part4_result
@@ -676,7 +744,7 @@ def full_episode_gen(ep_num=0, callback=None, log_file_name="debug_api_episode.l
             chapter_content = re.sub(r'##\s*EPISODE\s*\d+\s*##', '', full_response).strip()
 
             # 7차 호출: 전체 리뷰
-            info_lines["status"] = f"[EP{current_ep}/{config.total_episodes}] 리뷰 중..."
+            _notify(f"[EP{current_ep}/{config.total_episodes}] 리뷰 중...")
 
             agent_2nd = config.get_json_value().get("agent_2nd", "no")
 
@@ -716,27 +784,27 @@ def full_episode_gen(ep_num=0, callback=None, log_file_name="debug_api_episode.l
                 # 7차 호출: 편집자 1번 호출로 전체 읽고 기-승-전-결 각각 리뷰 출력
                 # =====================================================================
 
-                # 기-승-전-결로 분할
-                sections = chapter_content.split("####")
-                # 안전장치: sections가 4개 미만이면 빈 문자열로 채움 (IndexError 방지)
-                while len(sections) < 4:
-                    sections.append("")
+                # 기-승-전-결은 part1~4 결과를 구조화 데이터로 직접 사용
+                # (기존 chapter_content.split("####")는 구분자가 "#####"라서
+                #  각 섹션에 "#" 찌꺼기·구분선이 남은 채 리뷰 프롬프트에 들어갔음)
+                sections = [part1_result.strip(), part2_result.strip(),
+                            part3_result.strip(), part4_result.strip()]
                 section_names = VARS["section_names"]
 
                 # 유효한 섹션만 필터링 (비어있는 섹션 제외)
                 valid_sections = []
                 for i, sec in enumerate(sections):
-                    sec_stripped = sec.strip()
-                    if sec_stripped:
-                        valid_sections.append((section_names[i] if i < len(section_names) else f"파트{i+1}", sec_stripped))
+                    if sec:
+                        valid_sections.append((section_names[i] if i < len(section_names) else f"파트{i+1}", sec))
+                valid_names = {name for name, _ in valid_sections}
 
-                log(f"[EP{current_ep}] 기-승-전-결 분할 완료: {len(valid_sections)}개 섹션")
+                log(f"[EP{current_ep}] 기-승-전-결 구조화 완료: {len(valid_sections)}개 섹션")
 
                 # 전체 원문 (소설가가 전체 흐름 파악용)
                 full_context = chapter_content
 
                 # --- A) 편집자 4번 호출: 기-승-전-결 각각 개별 리뷰 (대화 컨텍스트 유지) ---
-                info_lines["status"] = f"[EP{current_ep}/{config.total_episodes}] 기-승-전-결 리뷰 중..."
+                _notify(f"[EP{current_ep}/{config.total_episodes}] 기-승-전-결 리뷰 중...")
 
                 section_reviews = {}
                 section_map = {"기": 0, "승": 1, "전": 2, "결": 3}
@@ -767,7 +835,7 @@ def full_episode_gen(ep_num=0, callback=None, log_file_name="debug_api_episode.l
                 section_reviews["기"] = review_result.strip()
 
                 # 2~4번 호출: 승, 전, 결 파트 (대화 컨텍스트 유지)
-                for sec_name in ["승", "전", "결"]:
+                for sec_name in [s for s in ["승", "전", "결"] if s in valid_names]:  # 빈 섹션 리뷰 호출 생략
                     review_prompt = _build_prompt(
                         prompts["review_meromero_other"],
                         sec_name=sec_name
@@ -809,7 +877,7 @@ def full_episode_gen(ep_num=0, callback=None, log_file_name="debug_api_episode.l
                 log(f"[EP{current_ep}] [AI]\n{review_result}...")
                 section_reviews2["기"] = review_result.strip()
 
-                for sec_name in ["승", "전", "결"]:
+                for sec_name in [s for s in ["승", "전", "결"] if s in valid_names]:  # 빈 섹션 리뷰 호출 생략
                     review_prompt = _build_prompt(
                         prompts["review_qwen_other"],
                         sec_name=sec_name
@@ -825,7 +893,7 @@ def full_episode_gen(ep_num=0, callback=None, log_file_name="debug_api_episode.l
                 # --- B) 소설가가 각 섹션별 리뷰를 사용하여 개별 재작성 ---
                 # shortnovel 동기화: Part 1~4 대화(messages)를 그대로 유지하여 계속 진행
                 # (재작성 모델이 대화 컨텍스트에서 모든 파트의 원문과 흐름을 직접 확인)
-                info_lines["status"] = f"[EP{current_ep}/{config.total_episodes}] 기-승-전-결 재작성 중..."
+                _notify(f"[EP{current_ep}/{config.total_episodes}] 기-승-전-결 재작성 중...")
                 revised_sections = []
 
                 if current_ep / config.total_episodes < 0.4:
@@ -852,42 +920,41 @@ def full_episode_gen(ep_num=0, callback=None, log_file_name="debug_api_episode.l
                 # 재작성된 기-승-전-결 하나로 합치기
                 revised_content = "\n\n----------------------------------\n#####\n\n".join(revised_sections)
 
-            # 수정된 내용 저장
+            # 수정된 내용 저장 — 완료 처리는 실제 내용 검증 후에만
             config.episode_full_original_content[current_ep - 1] = chapter_content
             config.episode_full_content[current_ep - 1] = revised_content
-            config.episode_full_track[current_ep - 1] = True
+            config.episode_full_track[current_ep - 1] = bool(revised_content.strip())
             all_chapter_content.append(revised_content)
 
-            # 마크다운 파일 저장 (리뷰 전/후)
-            result_dir = os.path.join("result")
-            os.makedirs(result_dir, exist_ok=True)
+            # 마크다운 파일 저장 (리뷰 전/후) — run 단위 디렉토리에 atomic write
+            # (기존: result/ 고정 경로 "w" 덮어쓰기로 이전 실행 결과가 소실됐음)
+            result_dir = _ensure_run_dir()
 
             filename_before = f"episode_{current_ep:02d}.md"
             filepath_before = os.path.join(result_dir, filename_before)
-            with open(filepath_before, "w", encoding="utf-8") as f:
-                f.write(f"# Episode {current_ep}\n\n")
-                f.write(chapter_content)
+            _atomic_write(filepath_before, f"# Episode {current_ep}\n\n" + chapter_content)
             log(f"[EP{current_ep}] 리뷰 전 저장: {filepath_before}")
 
             if agent_2nd == "yes":
                 filename_after = f"episode_{current_ep:02d}_reviewed.md"
                 filepath_after = os.path.join(result_dir, filename_after)
-                with open(filepath_after, "w", encoding="utf-8") as f:
-                    f.write(f"# Episode {current_ep}\n\n")
-                    f.write(revised_content)
+                _atomic_write(filepath_after, f"# Episode {current_ep}\n\n" + revised_content)
                 log(f"[EP{current_ep}] 리뷰 후 저장: {filepath_after}")
                 log(f"[EP{current_ep}] 완료 (기-승-전-결별 리뷰+수정 적용)")
+                _update_manifest(result_dir, current_ep, "completed_reviewed")
             else:
                 log(f"[EP{current_ep}] 완료 (리뷰/재작성 skip, 원문 markdown 출력)")
+                _update_manifest(result_dir, current_ep, "completed_raw")
 
         final_result = "\n\n".join(all_chapter_content)
         log(f"[full_episode_gen] 완료 - 총 {len(all_chapter_content)}개 에피소드 생성")
-        log_file.close()
         return final_result
 
     except Exception as e:
         # 예외를 로그에 기록하지 않으면 로그가 갑자기 끊겨 LLM 장애로 오인됨
         log(f"[ERROR] 전체 소설 생성 중 예외 발생: {type(e).__name__}: {e}")
         log(traceback.format_exc())
+        # 오류 문자열 반환은 상위(GUI)가 성공으로 오인하는 원인이었음 — 예외를 그대로 전파
+        raise
+    finally:
         log_file.close()
-        return f"전체 소설 생성 중 오류 발생: {e}\n(API 키 설정 등을 확인하세요)"

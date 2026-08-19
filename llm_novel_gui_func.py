@@ -334,7 +334,8 @@ def generate_episodes(callback=None):
             episodes = split_episodes(plot_result)
             for i in range(total_eps):
                 config.episode_content[i] = episodes[i] if i < len(episodes) else ""
-                config.episode_track[i] = True
+                # 빈 에피소드를 완료로 기록하지 않는다 (거짓 완료 방지)
+                config.episode_track[i] = bool(config.episode_content[i].strip())
             config.episode_gen_flag = True
 
             return {"success": True, "result_text": plot_result, "prog_msg": prog_msg}
@@ -350,7 +351,8 @@ def generate_episodes(callback=None):
             episodes = split_episodes(result_text)
             for i in range(total_eps):
                 config.episode_content[i] = episodes[i] if i < len(episodes) else ""
-                config.episode_track[i] = True
+                # 빈 에피소드를 완료로 기록하지 않는다 (거짓 완료 방지)
+                config.episode_track[i] = bool(config.episode_content[i].strip())
             config.episode_gen_flag = True
 
             return {"success": True, "result_text": result_text, "prog_msg": prog_msg}
@@ -391,16 +393,28 @@ def generate_story(ep_num: int, callback=None):
     Returns:
         dict: {"success": bool, "out_txt": str, "mode_text": str}
     """
+    mode_text = "전체 재생성" if ep_num == 0 else "이어서 생성" if ep_num == -1 else f"EP {ep_num} 단일 생성"
     try:
-        mode_text = "전체 재생성" if ep_num == 0 else "이어서 생성" if ep_num == -1 else f"EP {ep_num} 단일 생성"
-        result = full_episode_gen.full_episode_gen(ep_num=ep_num, callback=callback)
+        full_episode_gen.full_episode_gen(ep_num=ep_num, callback=callback)
         table = build_episode_full_track_table()
-        out_txt = f"{table}"
 
-        return {"success": True, "out_txt": out_txt, "mode_text": mode_text}
+        # 요청 범위의 실제 완료 여부를 검증 (거짓 성공 방지)
+        if ep_num > 0:
+            requested = [ep_num]
+        else:
+            requested = list(range(1, config.total_episodes + 1))
+        missing = [n for n in requested
+                   if not (config.episode_full_track[n - 1]
+                           and config.episode_full_content[n - 1].strip())]
+        if missing:
+            return {"success": False, "out_txt": f"{table}\n\n미완료 에피소드: {missing}",
+                    "mode_text": mode_text, "missing_episodes": missing}
+        return {"success": True, "out_txt": f"{table}", "mode_text": mode_text,
+                "missing_episodes": []}
 
     except Exception as e:
-        return {"success": False, "out_txt": str(e), "mode_text": ""}
+        table = build_episode_full_track_table()
+        return {"success": False, "out_txt": f"{e}\n\n{table}", "mode_text": mode_text}
 
 
 # -------------------------------------------------------------------------
@@ -512,11 +526,15 @@ def export_config_to_file(filepath: str) -> str:
         return f"설정 내보내기 실패: {e}"
 
 
-def restore_config_from_file(filepath: str) -> str:
-    """지정된 파일에서 config 변수를 복구합니다 (YAML/JSON 호환)."""
+def restore_config_from_file(filepath: str) -> tuple:
+    """지정된 파일에서 config 변수를 복구합니다 (YAML/JSON 호환).
+
+    Returns:
+        (success: bool, message: str) — 실패를 문자열로 위장하지 않는다.
+    """
     if not os.path.exists(filepath):
         logger.warning("복구 파일을 찾을 수 없음: %s", filepath)
-        return f"파일을 찾을 수 없습니다: {filepath}"
+        return False, f"파일을 찾을 수 없습니다: {filepath}"
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             # yaml.FullLoader 사용: !!python/tuple 등 Python 전용 태그도 파싱
@@ -534,10 +552,10 @@ def restore_config_from_file(filepath: str) -> str:
                 logger.info("[RESTORE_CHECK] EP%d special_writing_req: %s (키 타입: %s)", ep_num, actions, type(ep_num).__name__)
         else:
             logger.info("[RESTORE_CHECK] special_writing_req가 비어있음")
-        return f"설정 복구 성공: {filepath} (총 {len(saved_vars)}개 변수)"
+        return True, f"설정 복구 성공: {filepath} (총 {len(saved_vars)}개 변수)"
     except Exception as e:
         logger.error("설정 복구 실패: %s", e)
-        return f"설정 복구 실패: {e}"
+        return False, f"설정 복구 실패: {e}"
 
 
 def archive_to_done(result_dir: str = "result", comfyui_dir: str = None, done_dir: str = "done") -> str:
@@ -553,6 +571,18 @@ def archive_to_done(result_dir: str = "result", comfyui_dir: str = None, done_di
     """
     if comfyui_dir is None:
         comfyui_dir = os.path.join(os.path.expanduser("~"), "AI", "ComfyUI", "output")
+
+    # full_episode_gen이 result/<run_id>/에 저장하므로 latest 포인터로 최신 run을 해석
+    latest_pointer = os.path.join(result_dir, "latest")
+    if os.path.isfile(latest_pointer):
+        try:
+            with open(latest_pointer, encoding="utf-8") as f:
+                run_id = f.read().strip()
+            run_dir = os.path.join(result_dir, run_id)
+            if os.path.isdir(run_dir):
+                result_dir = run_dir
+        except Exception:
+            pass  # 포인터가 깨졌으면 기존 동작(result/ 직접) 유지
 
     try:
         # 1. 다음 book 번호 결정 (기존 done/book{N}/ 중 최대 N+1)
